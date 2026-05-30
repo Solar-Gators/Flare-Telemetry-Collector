@@ -1,50 +1,37 @@
 # main.py
 
-import serial
+import sys
+from PySide6.QtWidgets import QApplication
 
-from app.radio_parser import RadioFrameParser
-from app.payload_parsers import parse_payload, GpsData
+from app.gui import TelemetryWindow
 from app.telemetry_state import TelemetryState
+from app.telemetry_receiver import TelemetryReceiver
 
 
 PORT = "COM4"
 BAUD = 57600
 
-state = TelemetryState()
-
-
-def handle_message(msg_id: int, payload: bytes):
-    parsed = parse_payload(msg_id, payload)
-
-    if parsed is None:
-        print(f"Unknown message ID: 0x{msg_id:08X}")
-        print(f"Payload: {payload.hex(' ')}")
-        return
-
-    if isinstance(parsed, GpsData):
-        state.gps = parsed
-
-        print("----- GPS -----")
-        print(f"Latitude:   {parsed.latitude:.8f}")
-        print(f"Longitude:  {parsed.longitude:.8f}")
-        print(f"Speed:      {parsed.speed:.3f}")
-        print(f"Satellites: {parsed.satellites}")
-        print()
-
 
 def main():
-    ser = serial.Serial(PORT, BAUD, timeout=1)
-    parser = RadioFrameParser(on_message=handle_message)
+    state = TelemetryState()
 
-    print(f"Listening on {PORT} at {BAUD} baud...")
+    receiver = TelemetryReceiver(
+        port=PORT,
+        baud=BAUD,
+        state=state,
+    )
+    receiver.start()
 
-    while True:
-        data = ser.read(1)
+    app = QApplication(sys.argv)
 
-        if not data:
-            continue
+    win = TelemetryWindow(state)
+    win.showFullScreen()
 
-        parser.feed_byte(data[0])
+    exit_code = app.exec()
+
+    receiver.stop()
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

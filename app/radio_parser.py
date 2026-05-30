@@ -1,5 +1,4 @@
-# radio_parser.py
-
+# app/radio_parser.py
 import struct
 
 FRAME_START = 0x02
@@ -57,4 +56,7 @@ class RadioFrameParser:
             print(f"Invalid frame size: expected {size}, got {len(payload)}")
             return
 
-        self.on_message(msg_id, payload)
+        try:
+            self.on_message(msg_id, payload)
+        except Exception as e:
+            print(f"Error handling message 0x{msg_id:08X}: {e}")

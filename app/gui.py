@@ -1,3 +1,5 @@
+# app/gui.py
+
 import sys
 import time
 from PySide6.QtWidgets import (
@@ -6,6 +8,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPalette
+
+from app.telemetry_state import TelemetryState
 
 # ---------------------------------------------------------------------------
 # BMS fault bit masks
@@ -222,7 +226,7 @@ class TelemetryData:
 
     # Fault / contactor status
     fault_killed:         bool = False
-    array_contactor_open: bool = True
+    array_contactor_status: int = 0
     bms_contactor_open:   bool = True
     bms_fault_code:       int  = 0
 
@@ -239,8 +243,9 @@ class TelemetryData:
 
 class TelemetryWindow(QWidget):
 
-    def __init__(self):
+    def __init__(self, state: TelemetryState):
         super().__init__()
+        self.state = state
         self.data = TelemetryData()
         self.setWindowTitle("Flare Telemetry Dashboard")
         self.setStyleSheet(QSS)
@@ -486,18 +491,23 @@ class TelemetryWindow(QWidget):
         self._refresh()
 
     def _fetch_data(self):
-        """
-        *** Plug your data source here ***
-        Update self.data fields from CAN bus, serial, UDP, etc.
-        Set self.data.last_frame_bms / _steering / _front_vcu / _rear_vcu
-        to time.monotonic() (or time.time()) whenever a frame is received.
+        with self.state.lock:
+            if self.state.gps is not None:
+                self.data.gps_lat = self.state.gps.latitude
+                self.data.gps_lon = self.state.gps.longitude
+                self.data.gps_sats = self.state.gps.satellites
 
-        Example:
-            msg = self.can_bus.recv(timeout=0)
-            if msg:
-                parse_can_message(msg, self.data)
-        """
-        pass
+                # Change this if your embedded side sends km/h instead of mph.
+                self.data.speed_mph = self.state.gps.speed
+
+            if self.state.supp_batt is not None:
+                self.data.supp_batt_voltage = self.state.supp_batt.voltage_v
+                self.data.supp_batt_current = self.state.supp_batt.current_a
+
+            if self.state.rear_vcu_status is not None:
+                self.data.array_contactor_status = self.state.rear_vcu_status.array_contactor_status
+
+            self.data.last_frame_rear_vcu = self.state.last_frame_rear_vcu
 
     def _refresh(self):
         d   = self.data
@@ -564,13 +574,26 @@ class TelemetryWindow(QWidget):
         self.v_sats.update_val(str(d.gps_sats))
 
         # ── Contactors ─────────────────────────────────────────────────
-        def cont(is_open):
+        def array_contactor_text(status: int):
+            if status == 0:
+                return "OPEN", C_RED
+            if status == 1:
+                return "PRECHARGE", C_STALE
+            if status == 2:
+                return "MAIN CLOSED", C_OK
+            return f"UNKNOWN {status}", C_FAULT
+
+        def bms_contactor_text(is_open: bool):
             return ("OPEN", C_RED) if is_open else ("CLOSED", C_OK)
 
-        at, ac = cont(d.array_contactor_open)
-        bt, bc = cont(d.bms_contactor_open)
-        self.v_arr_cont._color = ac;  self.v_arr_cont.update_val(at)
-        self.v_bms_cont._color = bc;  self.v_bms_cont.update_val(bt)
+        at, ac = array_contactor_text(d.array_contactor_status)
+        bt, bc = bms_contactor_text(d.bms_contactor_open)
+
+        self.v_arr_cont._color = ac
+        self.v_arr_cont.update_val(at)
+
+        self.v_bms_cont._color = bc
+        self.v_bms_cont.update_val(bt)
 
         kt, kc = ("KILLED", C_FAULT) if d.fault_killed else ("OKAY", C_OK)
         self.v_kill._color = kc;      self.v_kill.update_val(kt)
@@ -618,31 +641,3 @@ class TelemetryWindow(QWidget):
                 f'{text}</span>'
             )
             lbl.setTextFormat(Qt.RichText)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def main():
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-
-    pal = QPalette()
-    pal.setColor(QPalette.Window,        QColor(BG_WINDOW))
-    pal.setColor(QPalette.WindowText,    QColor(C_TEXT))
-    pal.setColor(QPalette.Base,          QColor(BG_PANEL))
-    pal.setColor(QPalette.AlternateBase, QColor(BG_WINDOW))
-    pal.setColor(QPalette.Text,          QColor(C_TEXT))
-    pal.setColor(QPalette.ButtonText,    QColor(C_TEXT))
-    pal.setColor(QPalette.Button,        QColor(BG_PANEL))
-    pal.setColor(QPalette.Highlight,     QColor(ACCENT["blue"]))
-    app.setPalette(pal)
-
-    win = TelemetryWindow()
-    win.showFullScreen()
-    sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
