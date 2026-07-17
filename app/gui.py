@@ -1,11 +1,16 @@
 import sys
 import time
+import threading
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPalette
+
+from app.serial_reader import SerialReader
+from app.payload_parsers import parse_payload, GpsData
+from app.telemetry_state import TelemetryState
 
 # ---------------------------------------------------------------------------
 # BMS fault bit masks
@@ -49,6 +54,13 @@ C_TITLE    = "#5a7a90"      # card title
 C_OK       = "#00e676"
 C_FAULT    = "#ff1744"
 C_STALE    = "#ff9800"      # last-frame age warning colour
+
+# Header link-status states: (label, colour). Priority top-to-bottom.
+STALE_AFTER  = 5.0                          # s without any packet -> "no signal"
+ST_KILLED    = ("● KILLED",        C_FAULT) # car reported a fault kill
+ST_NO_CONN   = ("● NO CONNECTION", C_LABEL) # no USB radio port found
+ST_NO_SIGNAL = ("● NO SIGNAL",     C_STALE) # port open but no packets arriving
+ST_NOMINAL   = ("● NOMINAL",       C_OK)    # receiving packets
 
 ACCENT = {
     "blue":   "#1565c0",
@@ -226,6 +238,10 @@ class TelemetryData:
     bms_contactor_open:   bool = True
     bms_fault_code:       int  = 0
 
+    # Telemetry link status (populated from the serial reader)
+    link_connected: bool         = False  # USB radio port currently open
+    last_packet:    float | None = None   # time.monotonic() of last valid frame
+
     # Last-frame timestamps (unix time, or None if never received)
     last_frame_bms:      float | None = None
     last_frame_steering: float | None = None
@@ -246,6 +262,12 @@ class TelemetryWindow(QWidget):
         self.setStyleSheet(QSS)
         self._build_ui()
         self._refresh()
+
+        # Shared state populated by the serial thread, read by the GUI timer.
+        self._state = TelemetryState()
+        self._state_lock = threading.Lock()
+        self._reader = SerialReader(on_message=self._handle_message)
+        self._reader.start()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
@@ -485,19 +507,39 @@ class TelemetryWindow(QWidget):
         self._fetch_data()
         self._refresh()
 
-    def _fetch_data(self):
-        """
-        *** Plug your data source here ***
-        Update self.data fields from CAN bus, serial, UDP, etc.
-        Set self.data.last_frame_bms / _steering / _front_vcu / _rear_vcu
-        to time.monotonic() (or time.time()) whenever a frame is received.
+    def _handle_message(self, msg_id: int, payload: bytes):
+        """Runs on the serial thread — decode a frame into shared state.
 
-        Example:
-            msg = self.can_bus.recv(timeout=0)
-            if msg:
-                parse_can_message(msg, self.data)
+        Keep this thread-safe and Qt-free; the GUI thread reads the result in
+        _fetch_data().
         """
-        pass
+        now = time.monotonic()
+        parsed = parse_payload(msg_id, payload)
+
+        with self._state_lock:
+            # Any CRC-valid frame counts as "receiving", even unknown IDs.
+            self._state.last_packet = now
+            if isinstance(parsed, GpsData):
+                self._state.gps = parsed
+                self._state.last_frame_gps = now
+
+    def _fetch_data(self):
+        """Copy the latest serial-thread state into self.data (GUI thread)."""
+        with self._state_lock:
+            gps = self._state.gps
+            self.data.last_packet = self._state.last_packet
+
+        self.data.link_connected = self._reader.is_connected()
+
+        if gps is not None:
+            self.data.gps_lat   = gps.latitude
+            self.data.gps_lon   = gps.longitude
+            self.data.gps_sats  = gps.satellites
+            self.data.speed_mph = gps.speed
+
+    def closeEvent(self, event):
+        self._reader.stop()
+        super().closeEvent(event)
 
     def _refresh(self):
         d   = self.data
@@ -507,17 +549,19 @@ class TelemetryWindow(QWidget):
 
         # ── Header status ──────────────────────────────────────────────
         if d.fault_killed:
-            self.lbl_status.setText("● KILLED")
-            self.lbl_status.setStyleSheet(
-                f"color:{C_FAULT}; font-size:{SZ_HEADER}px; font-weight:700;"
-                f" letter-spacing:2px; background:transparent;"
-            )
+            text, color = ST_KILLED
+        elif not d.link_connected:
+            text, color = ST_NO_CONN
+        elif d.last_packet is None or (now - d.last_packet) > STALE_AFTER:
+            text, color = ST_NO_SIGNAL
         else:
-            self.lbl_status.setText("● NOMINAL")
-            self.lbl_status.setStyleSheet(
-                f"color:{C_OK}; font-size:{SZ_HEADER}px; font-weight:700;"
-                f" letter-spacing:2px; background:transparent;"
-            )
+            text, color = ST_NOMINAL
+
+        self.lbl_status.setText(text)
+        self.lbl_status.setStyleSheet(
+            f"color:{color}; font-size:{SZ_HEADER}px; font-weight:700;"
+            f" letter-spacing:2px; background:transparent;"
+        )
 
         # ── Main battery ───────────────────────────────────────────────
         mb_pwr = d.main_batt_voltage * d.main_batt_current
