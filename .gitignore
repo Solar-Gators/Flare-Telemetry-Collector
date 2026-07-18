@@ -11,6 +11,16 @@ __pycache__/
 .idea/
 .vscode/
 
+# Log files
+logs/
+*.log
+
+# Captured telemetry data (local SQLite store, WAL/SHM, offload exports)
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # Build outputs
 dist/
 build/

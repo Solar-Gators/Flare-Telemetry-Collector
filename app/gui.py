@@ -1,5 +1,7 @@
+import os
 import sys
 import time
+import logging
 import threading
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -9,8 +11,16 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPalette
 
 from app.serial_reader import SerialReader
-from app.payload_parsers import parse_payload, GpsData
+from app.payload_parsers import (
+    parse_payload, GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
+    BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
+    SteeringRequests, SteeringRequests2, FrontVcuDrive,
+    MpptInput, MpptOutput, MitsubaFrame0,
+)
 from app.telemetry_state import TelemetryState
+from app.logging_setup import setup_logging, get_log_buffer
+from app.storage import TelemetryStore, storage_enabled
+from app.uploader import UploaderThread, make_backend
 
 # ---------------------------------------------------------------------------
 # BMS fault bit masks
@@ -54,6 +64,8 @@ C_TITLE    = "#5a7a90"      # card title
 C_OK       = "#00e676"
 C_FAULT    = "#ff1744"
 C_STALE    = "#ff9800"      # last-frame age warning colour
+
+KNOTS_TO_MPH = 1.15078                       # GPS reports speed in knots
 
 # Header link-status states: (label, colour). Priority top-to-bottom.
 STALE_AFTER  = 5.0                          # s without any packet -> "no signal"
@@ -194,59 +206,63 @@ class Card(QFrame):
 # ---------------------------------------------------------------------------
 
 class TelemetryData:
+    # Every telemetry field defaults to None meaning "no data received yet";
+    # the GUI renders None as "N/A" rather than a misleading zero.
+
     # Main battery
-    main_batt_voltage: float = 0.0
-    main_batt_current: float = 0.0
-    main_batt_high_cell_temp: float = 0.0
-    main_batt_avg_cell_temp: float  = 0.0
+    main_batt_voltage: float | None = None
+    main_batt_current: float | None = None
+    main_batt_high_cell_temp: float | None = None
+    main_batt_avg_cell_temp: float | None  = None
 
     # Supplemental battery
-    supp_batt_voltage: float = 0.0
-    supp_batt_current: float = 0.0
+    supp_batt_voltage: float | None = None
+    supp_batt_current: float | None = None
 
     # MPPT 1
-    mppt1_input_voltage:  float = 0.0
-    mppt1_input_current:  float = 0.0
-    mppt1_output_voltage: float = 0.0
-    mppt1_output_current: float = 0.0
+    mppt1_input_voltage:  float | None = None
+    mppt1_input_current:  float | None = None
+    mppt1_output_voltage: float | None = None
+    mppt1_output_current: float | None = None
 
     # MPPT 2
-    mppt2_input_voltage:  float = 0.0
-    mppt2_input_current:  float = 0.0
-    mppt2_output_voltage: float = 0.0
-    mppt2_output_current: float = 0.0
+    mppt2_input_voltage:  float | None = None
+    mppt2_input_current:  float | None = None
+    mppt2_output_voltage: float | None = None
+    mppt2_output_current: float | None = None
 
     # MPPT 3
-    mppt3_input_voltage:  float = 0.0
-    mppt3_input_current:  float = 0.0
-    mppt3_output_voltage: float = 0.0
-    mppt3_output_current: float = 0.0
+    mppt3_input_voltage:  float | None = None
+    mppt3_input_current:  float | None = None
+    mppt3_output_voltage: float | None = None
+    mppt3_output_current: float | None = None
 
     # Motor controller
-    motor_voltage: float = 0.0
-    motor_current: float = 0.0
+    motor_voltage: float | None = None
+    motor_current: float | None = None
 
     # Speed / GPS
-    speed_mph: float = 0.0
-    gps_lat:   float = 0.0
-    gps_lon:   float = 0.0
-    gps_sats:  int   = 0
+    speed_mph: float | None = None
+    gps_lat:   float | None = None
+    gps_lon:   float | None = None
+    gps_sats:  int   | None = None
 
     # Fault / contactor status
-    fault_killed:         bool = False
-    array_contactor_open: bool = True
-    bms_contactor_open:   bool = True
-    bms_fault_code:       int  = 0
+    fault_killed:         bool | None = None
+    array_contactor_open: bool | None = None
+    bms_contactor_open:   bool | None = None
+    bms_fault_code:       int  | None = None
 
     # Telemetry link status (populated from the serial reader)
     link_connected: bool         = False  # USB radio port currently open
     last_packet:    float | None = None   # time.monotonic() of last valid frame
 
-    # Last-frame timestamps (unix time, or None if never received)
+    # Last-frame timestamps (time.monotonic(), or None if never received)
     last_frame_bms:      float | None = None
     last_frame_steering: float | None = None
     last_frame_front_vcu: float | None = None
     last_frame_rear_vcu:  float | None = None
+    last_frame_gps:      float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +270,8 @@ class TelemetryData:
 # ---------------------------------------------------------------------------
 
 class TelemetryWindow(QWidget):
+
+    LOG_LINES = 10          # how many recent log lines the overlay shows
 
     def __init__(self):
         super().__init__()
@@ -263,10 +281,27 @@ class TelemetryWindow(QWidget):
         self._build_ui()
         self._refresh()
 
+        # Log tail overlay, toggled with the 'L' key.
+        self._log_buffer = get_log_buffer()
+        self._log_visible = False
+        self._log_overlay = self._make_log_overlay()
+
+        # Local store (offline-first) + optional background uploader.
+        self._store = TelemetryStore() if storage_enabled() else None
+        self._uploader = None
+        if self._store is not None:
+            self._store.start()
+            backend = make_backend()
+            if backend is not None and self._store.enabled:
+                self._uploader = UploaderThread(self._store, backend)
+                self._uploader.start()
+
         # Shared state populated by the serial thread, read by the GUI timer.
         self._state = TelemetryState()
         self._state_lock = threading.Lock()
-        self._reader = SerialReader(on_message=self._handle_message)
+        # FLARE_SERIAL_PORT overrides auto-detect (e.g. a fake PTY for testing).
+        port = os.environ.get("FLARE_SERIAL_PORT") or None
+        self._reader = SerialReader(on_message=self._handle_message, port=port)
         self._reader.start()
 
         self._timer = QTimer(self)
@@ -486,7 +521,7 @@ class TelemetryWindow(QWidget):
         c_frames = Card("Last Frame Received", "gray")
 
         self._frame_labels: dict[str, QLabel] = {}
-        for node in ("BMS", "Steering Wheel", "Front VCU", "Rear VCU"):
+        for node in ("BMS", "Steering Wheel", "Front VCU", "Rear VCU", "GPS"):
             lbl = QLabel("never")
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             lbl.setStyleSheet(
@@ -506,6 +541,8 @@ class TelemetryWindow(QWidget):
     def _on_tick(self):
         self._fetch_data()
         self._refresh()
+        if self._log_visible:
+            self._update_log_overlay()
 
     def _handle_message(self, msg_id: int, payload: bytes):
         """Runs on the serial thread — decode a frame into shared state.
@@ -516,36 +553,221 @@ class TelemetryWindow(QWidget):
         now = time.monotonic()
         parsed = parse_payload(msg_id, payload)
 
+        # Persist every CRC-valid frame to the local store (never blocks here).
+        if self._store is not None:
+            self._store.record(msg_id, payload, time.time(), now, parsed)
+
         with self._state_lock:
+            s = self._state
             # Any CRC-valid frame counts as "receiving", even unknown IDs.
-            self._state.last_packet = now
+            s.last_packet = now
+
             if isinstance(parsed, GpsData):
-                self._state.gps = parsed
-                self._state.last_frame_gps = now
+                s.gps = parsed
+                s.last_frame_gps = now
+            elif isinstance(parsed, KillSwitch):
+                s.kill = parsed
+            elif isinstance(parsed, RearVcuStatus):
+                s.rear_vcu = parsed
+                s.last_frame_rear_vcu = now
+            elif isinstance(parsed, SupplementalBattery):
+                s.supp_battery = parsed
+                s.last_frame_rear_vcu = now      # supp battery is sent by the rear VCU
+            elif isinstance(parsed, BmsStatus):
+                s.bms_status = parsed
+                s.last_frame_bms = now
+            elif isinstance(parsed, BatteryVoltage):
+                s.battery_voltage = parsed
+                s.last_frame_bms = now
+            elif isinstance(parsed, BatteryTemperature):
+                s.battery_temp = parsed
+                s.last_frame_bms = now
+            elif isinstance(parsed, BatteryCurrent):
+                s.battery_current = parsed
+                s.last_frame_bms = now
+            elif isinstance(parsed, SteeringRequests):
+                s.steering = parsed
+                s.last_frame_steering = now
+            elif isinstance(parsed, SteeringRequests2):
+                s.steering2 = parsed
+                s.last_frame_steering = now
+            elif isinstance(parsed, FrontVcuDrive):
+                s.front_vcu = parsed
+                s.last_frame_front_vcu = now
+            elif isinstance(parsed, MitsubaFrame0):
+                s.mitsuba0 = parsed
+            elif isinstance(parsed, MpptInput):
+                s.mppt_input[parsed.mppt_index] = parsed
+            elif isinstance(parsed, MpptOutput):
+                s.mppt_output[parsed.mppt_index] = parsed
 
     def _fetch_data(self):
         """Copy the latest serial-thread state into self.data (GUI thread)."""
+        d = self.data
         with self._state_lock:
-            gps = self._state.gps
-            self.data.last_packet = self._state.last_packet
+            s = self._state
+            gps      = s.gps
+            kill     = s.kill
+            rear     = s.rear_vcu
+            supp     = s.supp_battery
+            bms      = s.bms_status
+            batt_v   = s.battery_voltage
+            batt_t   = s.battery_temp
+            batt_c   = s.battery_current
+            mitsuba0 = s.mitsuba0
+            mppt_in  = dict(s.mppt_input)
+            mppt_out = dict(s.mppt_output)
 
-        self.data.link_connected = self._reader.is_connected()
+            d.last_packet         = s.last_packet
+            d.last_frame_gps      = s.last_frame_gps
+            d.last_frame_bms      = s.last_frame_bms
+            d.last_frame_steering = s.last_frame_steering
+            d.last_frame_front_vcu = s.last_frame_front_vcu
+            d.last_frame_rear_vcu  = s.last_frame_rear_vcu
+
+        d.link_connected = self._reader.is_connected()
 
         if gps is not None:
-            self.data.gps_lat   = gps.latitude
-            self.data.gps_lon   = gps.longitude
-            self.data.gps_sats  = gps.satellites
-            self.data.speed_mph = gps.speed
+            d.gps_lat   = gps.latitude
+            d.gps_lon   = gps.longitude
+            d.gps_sats  = gps.satellites
+            d.speed_mph = gps.speed * KNOTS_TO_MPH
+
+        # ── Main battery (BMS) ─────────────────────────────────────────
+        if batt_v is not None:
+            d.main_batt_voltage = batt_v.total_voltage
+        if batt_c is not None:
+            d.main_batt_current = batt_c.current
+        if batt_t is not None:
+            d.main_batt_high_cell_temp = batt_t.high_temp
+            d.main_batt_avg_cell_temp  = batt_t.avg_temp
+
+        # ── Supplemental battery ───────────────────────────────────────
+        if supp is not None:
+            d.supp_batt_voltage = supp.voltage
+            # supp_batt_current scaling is TBD in the CAN map — left as N/A.
+
+        # ── Motor controller (Mitsuba battery-side V/A) ────────────────
+        if mitsuba0 is not None:
+            d.motor_voltage = mitsuba0.battery_voltage
+            d.motor_current = mitsuba0.battery_current
+
+        # ── MPPTs (index 0/1/2 -> cards 1/2/3) ─────────────────────────
+        for idx, mi in mppt_in.items():
+            n = idx + 1
+            setattr(d, f"mppt{n}_input_voltage", mi.input_voltage)
+            setattr(d, f"mppt{n}_input_current", mi.input_current)
+        for idx, mo in mppt_out.items():
+            n = idx + 1
+            setattr(d, f"mppt{n}_output_voltage", mo.output_voltage)
+            setattr(d, f"mppt{n}_output_current", mo.output_current)
+
+        # ── Contactors / fault status ──────────────────────────────────
+        if kill is not None:
+            d.fault_killed = kill.car_killed
+        if rear is not None:
+            # array contactors: 0 both open, 1 precharge closed, 2 main closed
+            d.array_contactor_open = (rear.array_contactors == 0)
+        if bms is not None:
+            d.bms_contactor_open = not bms.contactor_closed
+            d.bms_fault_code     = bms.fault_code
 
     def closeEvent(self, event):
         self._reader.stop()
+        if self._uploader is not None:
+            self._uploader.stop()
+        if self._store is not None:
+            self._store.stop()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------- Log overlay
+
+    def _make_log_overlay(self) -> QWidget:
+        panel = QFrame(self)
+        panel.setStyleSheet(
+            f"background:rgba(5,7,10,238); border-top:2px solid {C_BLUE};"
+        )
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(14, 8, 14, 10)
+        lay.setSpacing(2)
+
+        title = QLabel(f"RECENT LOGS — last {self.LOG_LINES}   (press L to hide)")
+        title.setStyleSheet(
+            f"color:{C_TITLE}; font-size:{SZ_CARD_TITLE}px; font-weight:700;"
+            f" letter-spacing:1px; background:transparent;"
+        )
+        lay.addWidget(title)
+
+        self._log_text = QLabel("")
+        self._log_text.setTextFormat(Qt.RichText)
+        self._log_text.setWordWrap(False)
+        self._log_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._log_text.setStyleSheet(
+            "font-family:'Courier New', monospace; font-size:13px;"
+            " background:transparent;"
+        )
+        lay.addWidget(self._log_text)
+        lay.addStretch()
+
+        panel.hide()
+        return panel
+
+    def _position_log_overlay(self):
+        h = 44 + self.LOG_LINES * 19
+        self._log_overlay.setGeometry(0, self.height() - h, self.width(), h)
+
+    def _update_log_overlay(self):
+        if not self._log_buffer:
+            self._log_text.setText(
+                f'<span style="color:{C_LABEL};">(no log records yet)</span>'
+            )
+            return
+
+        rows = list(self._log_buffer)[-self.LOG_LINES:]
+        html = []
+        for levelno, text in rows:
+            if levelno >= logging.ERROR:
+                color = C_FAULT
+            elif levelno >= logging.WARNING:
+                color = C_STALE
+            elif levelno <= logging.DEBUG:
+                color = C_LABEL
+            else:
+                color = C_TEXT
+            safe = (text.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;"))
+            html.append(f'<span style="color:{color};">{safe}</span>')
+        self._log_text.setText("<br>".join(html))
+
+    def _toggle_logs(self):
+        self._log_visible = not self._log_visible
+        if self._log_visible:
+            self._position_log_overlay()
+            self._update_log_overlay()
+            self._log_overlay.show()
+            self._log_overlay.raise_()
+        else:
+            self._log_overlay.hide()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_L:
+            self._toggle_logs()
+        else:
+            super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._log_visible:
+            self._position_log_overlay()
 
     def _refresh(self):
         d   = self.data
         now = time.monotonic()
-        f1  = lambda v: f"{v:.1f}"
-        f0  = lambda v: f"{v:.0f}"
+        f1  = lambda v: "N/A" if v is None else f"{v:.1f}"
+        f0  = lambda v: "N/A" if v is None else f"{v:.0f}"
+        # Product of two readings, or None if either is missing.
+        prod = lambda a, b: None if a is None or b is None else a * b
 
         # ── Header status ──────────────────────────────────────────────
         if d.fault_killed:
@@ -564,7 +786,7 @@ class TelemetryWindow(QWidget):
         )
 
         # ── Main battery ───────────────────────────────────────────────
-        mb_pwr = d.main_batt_voltage * d.main_batt_current
+        mb_pwr = prod(d.main_batt_voltage, d.main_batt_current)
         self.v_mb_v.update_val(f1(d.main_batt_voltage))
         self.v_mb_a.update_val(f1(d.main_batt_current))
         self.v_mb_w.update_val(f0(mb_pwr))
@@ -572,43 +794,48 @@ class TelemetryWindow(QWidget):
         self.v_mb_at.update_val(f1(d.main_batt_avg_cell_temp))
 
         # ── Supplemental battery ───────────────────────────────────────
-        sb_pwr = d.supp_batt_voltage * d.supp_batt_current
+        sb_pwr = prod(d.supp_batt_voltage, d.supp_batt_current)
         self.v_sb_v.update_val(f1(d.supp_batt_voltage))
         self.v_sb_a.update_val(f1(d.supp_batt_current))
         self.v_sb_w.update_val(f1(sb_pwr))
 
         # ── Motor controller ───────────────────────────────────────────
-        mc_pwr = d.motor_voltage * d.motor_current
+        mc_pwr = prod(d.motor_voltage, d.motor_current)
         self.v_mc_v.update_val(f1(d.motor_voltage))
         self.v_mc_a.update_val(f1(d.motor_current))
         self.v_mc_w.update_val(f0(mc_pwr))
 
         # ── Speed ──────────────────────────────────────────────────────
-        self.v_speed.setText(f"{d.speed_mph:.0f}")
+        self.v_speed.setText(f0(d.speed_mph))
 
         # ── MPPTs + total solar ────────────────────────────────────────
         total_solar = 0.0
+        have_solar  = False        # stays False until at least one MPPT reports
         for n in (1, 2, 3):
             iv = getattr(d, f"mppt{n}_input_voltage")
             ic = getattr(d, f"mppt{n}_input_current")
             ov = getattr(d, f"mppt{n}_output_voltage")
             oc = getattr(d, f"mppt{n}_output_current")
-            op = ov * oc
-            total_solar += op
+            op = prod(ov, oc)
+            if op is not None:
+                total_solar += op
+                have_solar = True
             getattr(self, f"v_m{n}_iv").update_val(f1(iv))
             getattr(self, f"v_m{n}_ic").update_val(f1(ic))
             getattr(self, f"v_m{n}_ov").update_val(f1(ov))
             getattr(self, f"v_m{n}_oc").update_val(f1(oc))
             getattr(self, f"v_m{n}_op").update_val(f0(op))
-        self.v_solar.setText(f"{total_solar:.0f}")
+        self.v_solar.setText(f"{total_solar:.0f}" if have_solar else "N/A")
 
         # ── GPS ────────────────────────────────────────────────────────
-        self.v_lat.update_val(f"{abs(d.gps_lat):.4f}")
-        self.v_lon.update_val(f"{abs(d.gps_lon):.4f}")
-        self.v_sats.update_val(str(d.gps_sats))
+        self.v_lat.update_val("N/A" if d.gps_lat is None else f"{abs(d.gps_lat):.4f}")
+        self.v_lon.update_val("N/A" if d.gps_lon is None else f"{abs(d.gps_lon):.4f}")
+        self.v_sats.update_val("N/A" if d.gps_sats is None else str(d.gps_sats))
 
         # ── Contactors ─────────────────────────────────────────────────
         def cont(is_open):
+            if is_open is None:
+                return ("N/A", C_LABEL)
             return ("OPEN", C_RED) if is_open else ("CLOSED", C_OK)
 
         at, ac = cont(d.array_contactor_open)
@@ -616,16 +843,26 @@ class TelemetryWindow(QWidget):
         self.v_arr_cont._color = ac;  self.v_arr_cont.update_val(at)
         self.v_bms_cont._color = bc;  self.v_bms_cont.update_val(bt)
 
-        kt, kc = ("KILLED", C_FAULT) if d.fault_killed else ("OKAY", C_OK)
+        if d.fault_killed is None:
+            kt, kc = ("N/A", C_LABEL)
+        else:
+            kt, kc = ("KILLED", C_FAULT) if d.fault_killed else ("OKAY", C_OK)
         self.v_kill._color = kc;      self.v_kill.update_val(kt)
 
         # ── BMS fault code ─────────────────────────────────────────────
         code = d.bms_fault_code
-        self.v_bms_hex._color = C_FAULT if code else C_GREEN
-        self.v_bms_hex.update_val(f"0x{code:04X}")
-        self.v_bms_name.setText(decode_bms_faults(code))
+        if code is None:
+            self.v_bms_hex._color = C_LABEL
+            self.v_bms_hex.update_val("N/A")
+            self.v_bms_name.setText("N/A")
+            name_color = C_LABEL
+        else:
+            self.v_bms_hex._color = C_FAULT if code else C_GREEN
+            self.v_bms_hex.update_val(f"0x{code:04X}")
+            self.v_bms_name.setText(decode_bms_faults(code))
+            name_color = C_FAULT if code else C_OK
         self.v_bms_name.setStyleSheet(
-            f"color:{C_FAULT if code else C_OK}; font-size:16px; font-weight:700;"
+            f"color:{name_color}; font-size:16px; font-weight:700;"
             f" background:transparent; padding:4px 0;"
         )
 
@@ -636,16 +873,17 @@ class TelemetryWindow(QWidget):
             "Steering Wheel":d.last_frame_steering,
             "Front VCU":     d.last_frame_front_vcu,
             "Rear VCU":      d.last_frame_rear_vcu,
+            "GPS":           d.last_frame_gps,
         }
         for node, ts in frame_map.items():
             lbl = self._frame_labels[node]
             if ts is None:
                 text  = "never"
-                color = C_STALE
+                color = C_FAULT
             else:
                 age = now - ts
                 if age < 1.0:
-                    text  = f"{age*1000:.0f} ms ago"
+                    text  = "live"
                     color = C_OK
                 elif age < 5.0:
                     text  = f"{age:.1f} s ago"
@@ -669,6 +907,8 @@ class TelemetryWindow(QWidget):
 # ---------------------------------------------------------------------------
 
 def main():
+    setup_logging()
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
