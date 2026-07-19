@@ -6,7 +6,7 @@ from app.payload_parsers import (
     GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
     BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
     SteeringRequests, SteeringRequests2, FrontVcuDrive,
-    MpptInput, MpptOutput, MitsubaFrame0,
+    MitsubaFrame0,
 )
 
 
@@ -34,9 +34,8 @@ class TelemetryState:
     # Motor controller (Mitsuba primary status frame)
     mitsuba0: Optional[MitsubaFrame0] = None
 
-    # MPPTs, keyed by mppt_index (0=front, 1=mid, 2=rear)
-    mppt_input: dict = field(default_factory=dict)
-    mppt_output: dict = field(default_factory=dict)
+    # MPPTs (MpptData), keyed by mppt_index (1, 2, 3)
+    mppt: dict = field(default_factory=dict)
 
     # Last-frame timestamps per node (time.monotonic(), or None if never seen)
     last_frame_gps: Optional[float] = None

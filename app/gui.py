@@ -15,27 +15,13 @@ from app.payload_parsers import (
     parse_payload, GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
     BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
     SteeringRequests, SteeringRequests2, FrontVcuDrive,
-    MpptInput, MpptOutput, MitsubaFrame0,
+    MpptData, MitsubaFrame0, BMS_FAULTS,
 )
 from app.telemetry_state import TelemetryState
 from app.logging_setup import setup_logging, get_log_buffer
 from app.storage import TelemetryStore, storage_enabled
 from app.uploader import UploaderThread, make_backend
 
-# ---------------------------------------------------------------------------
-# BMS fault bit masks
-# ---------------------------------------------------------------------------
-BMS_FAULTS = {
-    0x0001: "OVERVOLTAGE",
-    0x0002: "UNDERVOLTAGE",
-    0x0004: "CELL_IMBALANCE",
-    0x0008: "OVERTEMPERATURE",
-    0x0010: "UNDERTEMPERATURE",
-    0x0020: "BATTERY_OVERCURRENT",
-    0x0040: "AUX_OVERCURRENT",
-    0x0080: "FLEET_DATA_STALE",
-    0x0100: "EMERGENCY_SHUTDOWN",
-}
 
 def decode_bms_faults(code: int) -> str:
     if code == 0:
@@ -502,9 +488,8 @@ class TelemetryWindow(QWidget):
         ref_text = (
             "0x0001 OVERVOLTAGE    0x0002 UNDERVOLTAGE\n"
             "0x0004 CELL_IMBALANCE 0x0008 OVERTEMPERATURE\n"
-            "0x0010 UNDERTEMP      0x0020 BATT_OVERCURRENT\n"
-            "0x0040 AUX_OVERCURRENT 0x0080 DATA_STALE\n"
-            "0x0100 EMERGENCY_SHUTDOWN"
+            "0x0010 BATT_OVERCURRENT 0x0020 AUX_OVERCURRENT\n"
+            "0x0040 DATA_STALE 0x0080 EMERGENCY_SHUTDOWN\n"
         )
         ref = QLabel(ref_text)
         ref.setStyleSheet(
@@ -596,10 +581,8 @@ class TelemetryWindow(QWidget):
                 s.last_frame_front_vcu = now
             elif isinstance(parsed, MitsubaFrame0):
                 s.mitsuba0 = parsed
-            elif isinstance(parsed, MpptInput):
-                s.mppt_input[parsed.mppt_index] = parsed
-            elif isinstance(parsed, MpptOutput):
-                s.mppt_output[parsed.mppt_index] = parsed
+            elif isinstance(parsed, MpptData):
+                s.mppt[parsed.mppt_index] = parsed
 
     def _fetch_data(self):
         """Copy the latest serial-thread state into self.data (GUI thread)."""
@@ -615,8 +598,7 @@ class TelemetryWindow(QWidget):
             batt_t   = s.battery_temp
             batt_c   = s.battery_current
             mitsuba0 = s.mitsuba0
-            mppt_in  = dict(s.mppt_input)
-            mppt_out = dict(s.mppt_output)
+            mppt = dict(s.mppt)
 
             d.last_packet         = s.last_packet
             d.last_frame_gps      = s.last_frame_gps
@@ -652,15 +634,12 @@ class TelemetryWindow(QWidget):
             d.motor_voltage = mitsuba0.battery_voltage
             d.motor_current = mitsuba0.battery_current
 
-        # ── MPPTs (index 0/1/2 -> cards 1/2/3) ─────────────────────────
-        for idx, mi in mppt_in.items():
-            n = idx + 1
-            setattr(d, f"mppt{n}_input_voltage", mi.input_voltage)
-            setattr(d, f"mppt{n}_input_current", mi.input_current)
-        for idx, mo in mppt_out.items():
-            n = idx + 1
-            setattr(d, f"mppt{n}_output_voltage", mo.output_voltage)
-            setattr(d, f"mppt{n}_output_current", mo.output_current)
+        # ── MPPTs (mppt_index 1/2/3 -> cards 1/2/3) ────────────────────
+        for n, m in mppt.items():
+            setattr(d, f"mppt{n}_input_voltage", m.input_voltage)
+            setattr(d, f"mppt{n}_input_current", m.input_current)
+            setattr(d, f"mppt{n}_output_voltage", m.output_voltage)
+            setattr(d, f"mppt{n}_output_current", m.output_current)
 
         # ── Contactors / fault status ──────────────────────────────────
         if kill is not None:

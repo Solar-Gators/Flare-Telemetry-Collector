@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # GPS (telemetry-internal, not part of the car CAN map)
 # ---------------------------------------------------------------------------
 
-GPS_PACKET_ID = 0xFFFFFFFF
+GPS_PACKET_ID = 0x10000000   # telem-internal ID the firmware sends GPS under (21B <ddfB)
 
 
 @dataclass
@@ -60,17 +60,6 @@ ID_MITSUBA_FRAME0  = 0x08850225   # Mitsuba -> bus
 ID_MITSUBA_FRAME1  = 0x08950225
 ID_MITSUBA_FRAME2  = 0x08A50225
 
-# Elmar MPPTs (11-bit). Each MPPT has a base address; message = base + offset.
-# Bases front->rear are 0x600, 0x610, 0x620.
-MPPT_BASES = {0x600: 0, 0x610: 1, 0x620: 2}   # base -> index (0=front,1=mid,2=rear)
-MPPT_OFF_INPUT   = 0x0
-MPPT_OFF_OUTPUT  = 0x1
-MPPT_OFF_TEMP    = 0x2
-MPPT_OFF_AUX     = 0x3
-MPPT_OFF_LIMITS  = 0x4
-MPPT_OFF_STATUS  = 0x5
-MPPT_OFF_POWER   = 0x6
-
 
 # ---------------------------------------------------------------------------
 # BMS fault bit masks (message 0x040, bytes 0-1)
@@ -81,11 +70,10 @@ BMS_FAULTS = {
     0x0002: "UNDERVOLTAGE",
     0x0004: "CELL_IMBALANCE",
     0x0008: "OVERTEMPERATURE",
-    0x0010: "UNDERTEMPERATURE",
-    0x0020: "BATTERY_OVERCURRENT",
-    0x0040: "AUX_OVERCURRENT",
-    0x0080: "FLEET_DATA_STALE",
-    0x0100: "EMERGENCY_SHUTDOWN",
+    0x0010: "BATTERY_OVERCURRENT",
+    0x0020: "AUX_OVERCURRENT",
+    0x0040: "FLEET_DATA_STALE",
+    0x0080: "EMERGENCY_SHUTDOWN",
 }
 
 
@@ -372,110 +360,28 @@ def _parse_mitsuba_frame2(p: bytes) -> MitsubaFrame2:
 
 
 # ---------------------------------------------------------------------------
-# Elmar MPPT messages
+# MPPT frame (telem-internal)
 # ---------------------------------------------------------------------------
-# Byte layout per the map: the high half of the frame (bytes 4-7) holds the
-# first named value, the low half (bytes 0-3) the second. Values are IEEE-754
-# floats — assumed little-endian (Elmar convention); VERIFY against firmware.
+# The firmware forwards each MPPT as a single 16-byte message: MPPT n is sent
+# under ID 0x10000000 + n (n = 1..3), carrying four little-endian floats:
+# input current, input voltage, output current, output voltage.
+
+MPPT_IDS = {0x10000001: 1, 0x10000002: 2, 0x10000003: 3}   # can_id -> index
+
 
 @dataclass
-class MpptInput:
-    """base+0 — MPPT input measurements."""
-    mppt_index: int           # 0 front, 1 mid, 2 rear
-    input_voltage: float      # V
+class MpptData:
+    """0x1000000n — MPPT input/output measurements (4 LE floats)."""
+    mppt_index: int           # 1, 2, 3 (firmware numbering)
     input_current: float      # A
-
-
-@dataclass
-class MpptOutput:
-    """base+1 — MPPT output measurements."""
-    mppt_index: int
-    output_voltage: float     # V
+    input_voltage: float      # V
     output_current: float     # A
+    output_voltage: float     # V
 
 
-@dataclass
-class MpptTemperature:
-    """base+2 — MPPT temperatures."""
-    mppt_index: int
-    mosfet_temp: float        # °C
-    controller_temp: float    # °C
-
-
-@dataclass
-class MpptAux:
-    """base+3 — MPPT auxiliary rails."""
-    mppt_index: int
-    aux_12v: float            # V
-    aux_3v: float             # V
-
-
-@dataclass
-class MpptLimits:
-    """base+4 — MPPT max output voltage / max input current."""
-    mppt_index: int
-    max_output_voltage: float # V
-    max_input_current: float  # A
-
-
-@dataclass
-class MpptStatus:
-    """base+5 — MPPT counters, flags, mode (all single-byte fields)."""
-    mppt_index: int
-    can_rx_error_count: int
-    can_tx_error_count: int
-    can_tx_overflow_count: int
-    error_flags: int          # byte 3 bitfield
-    limit_flags: int          # byte 4 bitfield
-    mode_on: bool             # byte 5: 0 standby, 1 on
-    test_counter: int         # byte 7: increments once per second
-
-
-@dataclass
-class MpptPower:
-    """base+6 — MPPT power-connector temp / output voltage (battery side)."""
-    mppt_index: int
-    power_connector_temp: float   # °C
-    output_voltage_batt_side: float  # V
-
-
-def _mppt_two_floats(p: bytes):
-    """Return (low_half, high_half) floats: bytes 0-3 then bytes 4-7."""
-    low, high = struct.unpack_from("<ff", p, 0)
-    return low, high
-
-
-def _parse_mppt(index: int, offset: int, p: bytes):
-    if offset == MPPT_OFF_INPUT:
-        current, voltage = _mppt_two_floats(p)
-        return MpptInput(index, voltage, current)
-    if offset == MPPT_OFF_OUTPUT:
-        current, voltage = _mppt_two_floats(p)
-        return MpptOutput(index, voltage, current)
-    if offset == MPPT_OFF_TEMP:
-        controller, mosfet = _mppt_two_floats(p)
-        return MpptTemperature(index, mosfet, controller)
-    if offset == MPPT_OFF_AUX:
-        aux3, aux12 = _mppt_two_floats(p)
-        return MpptAux(index, aux12, aux3)
-    if offset == MPPT_OFF_LIMITS:
-        max_in_current, max_out_voltage = _mppt_two_floats(p)
-        return MpptLimits(index, max_out_voltage, max_in_current)
-    if offset == MPPT_OFF_STATUS:
-        return MpptStatus(
-            mppt_index=index,
-            can_rx_error_count=p[0],
-            can_tx_error_count=p[1],
-            can_tx_overflow_count=p[2],
-            error_flags=p[3],
-            limit_flags=p[4],
-            mode_on=bool(p[5]),
-            test_counter=p[7],
-        )
-    if offset == MPPT_OFF_POWER:
-        out_voltage, conn_temp = _mppt_two_floats(p)
-        return MpptPower(index, conn_temp, out_voltage)
-    return None
+def _parse_mppt_data(index: int, p: bytes) -> MpptData:
+    in_a, in_v, out_a, out_v = struct.unpack_from("<ffff", p, 0)
+    return MpptData(index, in_a, in_v, out_a, out_v)
 
 
 # ---------------------------------------------------------------------------
@@ -508,11 +414,10 @@ def _dispatch(msg_id: int, payload: bytes):
     if parser is not None:
         return parser(payload)
 
-    # Elmar MPPT: base address + message offset (0x600/0x610/0x620, +0..+6).
-    base = msg_id & 0x7F0
-    offset = msg_id & 0x00F
-    if base in MPPT_BASES and offset <= MPPT_OFF_POWER:
-        return _parse_mppt(MPPT_BASES[base], offset, payload)
+    # MPPT frame (one 16-byte message per MPPT).
+    mppt_index = MPPT_IDS.get(msg_id)
+    if mppt_index is not None:
+        return _parse_mppt_data(mppt_index, payload)
 
     return None
 

@@ -31,7 +31,7 @@ from app.payload_parsers import (
     ID_BMS_STATUS, ID_BATTERY_VOLTAGE, ID_BATTERY_TEMP, ID_BATTERY_CURRENT,
     ID_STEERING_REQUESTS, ID_STEERING_REQUESTS2, ID_FRONT_VCU_DRIVE, ID_SPEED,
     ID_MITSUBA_FRAME0, ID_MITSUBA_FRAME1, ID_MITSUBA_FRAME2,
-    MPPT_BASES,
+    MPPT_IDS,
 )
 
 LINK = os.environ.get("FAKE_PORT_LINK", "/tmp/ttyUSB0")
@@ -162,18 +162,15 @@ def mitsuba2_payload(t):
 
 
 def mppt_payloads(t):
-    """One input, output, temperature, and power frame per MPPT base."""
+    """One combined 16-byte frame per MPPT: inA, inV, outA, outV (LE floats)."""
     frames = []
-    for base, idx in MPPT_BASES.items():
+    for can_id, idx in MPPT_IDS.items():
         sun = 0.5 + 0.5 * math.sin(t / 8.0 + idx)         # 0..1 irradiance-ish
         in_v = 80.0 + 10.0 * math.sin(t / 6.0 + idx)
         in_a = 5.0 * sun
         out_v = 110.0 + 5.0 * math.sin(t / 6.0)
         out_a = (in_v * in_a) / max(out_v, 1.0)
-        frames.append((base + 0, struct.pack("<ff", in_a, in_v)))    # input: current, voltage
-        frames.append((base + 1, struct.pack("<ff", out_a, out_v)))  # output: current, voltage
-        frames.append((base + 2, struct.pack("<ff", 40.0, 55.0)))    # temp: controller, mosfet
-        frames.append((base + 6, struct.pack("<ff", out_v, 45.0)))   # power: out_v, conn temp
+        frames.append((can_id, struct.pack("<ffff", in_a, in_v, out_a, out_v)))
     return frames
 
 

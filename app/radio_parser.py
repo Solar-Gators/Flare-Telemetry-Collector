@@ -10,6 +10,11 @@ CRC_LEN = 2             # uint16 CRC-16
 DELIMITER = 0x00        # COBS frame delimiter
 MAX_FRAME_BYTES = 4096  # drop the buffer if a delimiter never arrives (garbage stream)
 
+# ----- STX/ETX framing constants (used by the commented-out `main` parser) --
+FRAME_START = 0x02
+FRAME_END = 0x03
+FRAME_ESCAPE = 0x1B
+
 
 def _hex(b: bytes, limit: int = 64) -> str:
     """Space-separated hex, truncated so log lines stay bounded."""
@@ -85,6 +90,9 @@ class RadioFrameParser:
     Because 0x00 never appears inside a COBS frame, the delimiter gives clean
     framing even when attaching mid-stream (the first partial frame is simply
     dropped). CRC-16/CCITT-FALSE over header+payload guards each frame.
+
+    NOTE: the STX/ETX-framed `main` variant (no CRC) is kept commented at the
+    bottom of this file so we can switch back quickly.
     """
 
     def __init__(self, on_message, crc_big_endian: bool = False):
@@ -149,3 +157,69 @@ class RadioFrameParser:
 
         logger.debug("decode ok: canID=0x%08X size=%dB", can_id, size)
         self.on_message(can_id, payload)
+
+
+# ----- STX/ETX framing variant, matches `main` (inactive; swap the class above
+#       for this to restore). Body layout: uint8 size | uint32 msg_id | payload,
+#       no CRC. Escapes 0x02/0x03/0x1B in the body with FRAME_ESCAPE (0x1B).
+# class RadioFrameParser:
+#     def __init__(self, on_message):
+#         self.on_message = on_message
+#         self.in_frame = False
+#         self.escaped = False
+#         self.frame = bytearray()
+#
+#     def feed(self, data: bytes):
+#         """Convenience for byte-chunk callers (e.g. SerialReader)."""
+#         for b in data:
+#             self.feed_byte(b)
+#
+#     def feed_byte(self, byte: int):
+#         if not self.in_frame:
+#             if byte == FRAME_START:
+#                 self.in_frame = True
+#                 self.escaped = False
+#                 self.frame.clear()
+#             return
+#
+#         if self.escaped:
+#             self.frame.append(byte)
+#             self.escaped = False
+#             return
+#
+#         if byte == FRAME_ESCAPE:
+#             self.escaped = True
+#             return
+#
+#         if byte == FRAME_END:
+#             self._parse_frame(bytes(self.frame))
+#             self.in_frame = False
+#             self.escaped = False
+#             self.frame.clear()
+#             return
+#
+#         if byte == FRAME_START:
+#             self.frame.clear()
+#             self.escaped = False
+#             return
+#
+#         self.frame.append(byte)
+#
+#     def _parse_frame(self, body: bytes):
+#         if len(body) < 5:
+#             logger.warning("decode fail [short]: %dB frame, need >=5B", len(body))
+#             return
+#
+#         size = body[0]
+#         msg_id = struct.unpack_from("<I", body, 1)[0]
+#         payload = body[5:]
+#
+#         if len(payload) != size:
+#             logger.warning(
+#                 "decode fail [size]: header size=%d, got %dB payload",
+#                 size, len(payload),
+#             )
+#             return
+#
+#         logger.debug("decode ok: msgID=0x%08X size=%dB", msg_id, size)
+#         self.on_message(msg_id, payload)
