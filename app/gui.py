@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import threading
+from collections import deque
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSizePolicy
@@ -15,7 +16,7 @@ from app.payload_parsers import (
     parse_payload, GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
     BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
     SteeringRequests, SteeringRequests2, FrontVcuDrive,
-    MpptData, MitsubaFrame0, BMS_FAULTS,
+    MpptData, MitsubaFrame0, RadioStats, BMS_FAULTS,
 )
 from app.telemetry_state import TelemetryState
 from app.logging_setup import setup_logging, get_log_buffer
@@ -54,7 +55,8 @@ C_STALE    = "#ff9800"      # last-frame age warning colour
 KNOTS_TO_MPH = 1.15078                       # GPS reports speed in knots
 
 # Header link-status states: (label, colour). Priority top-to-bottom.
-STALE_AFTER  = 5.0                          # s without any packet -> "no signal"
+STALE_AFTER   = 5.0                         # s without any packet -> "no signal"
+LOSS_WINDOW_S = 60.0                        # rolling window for the radio drop rate
 ST_KILLED    = ("● KILLED",        C_FAULT) # car reported a fault kill
 ST_NO_CONN   = ("● NO CONNECTION", C_LABEL) # no USB radio port found
 ST_NO_SIGNAL = ("● NO SIGNAL",     C_STALE) # port open but no packets arriving
@@ -239,6 +241,17 @@ class TelemetryData:
     bms_contactor_open:   bool | None = None
     bms_fault_code:       int  | None = None
 
+    # Radio link diagnostics (telemetry board's CAN->radio bridge)
+    radio_queue_used:     int | None = None
+    radio_queue_capacity: int | None = None
+    radio_queue_high:     int | None = None
+    radio_dropped:        int | None = None
+    radio_sent:           int | None = None
+    radio_interval_ms:    int | None = None
+
+    # Frames we've successfully decoded locally (any ID), since GUI start.
+    packets_decoded:      int | None = None
+
     # Telemetry link status (populated from the serial reader)
     link_connected: bool         = False  # USB radio port currently open
     last_packet:    float | None = None   # time.monotonic() of last valid frame
@@ -262,6 +275,11 @@ class TelemetryWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.data = TelemetryData()
+        # Rolling history of (monotonic_ts, radio_sent, packets_decoded) samples,
+        # one per fresh RadioStats snapshot, used to compute the drop rate over the
+        # last LOSS_WINDOW_S. The counters' different epochs (radio boot vs GUI
+        # start) cancel because loss is a delta between two samples.
+        self._loss_samples = deque()
         self.setWindowTitle("Flare Telemetry Dashboard")
         self.setStyleSheet(QSS)
         self._build_ui()
@@ -519,6 +537,24 @@ class TelemetryWindow(QWidget):
         c_frames.add_stretch()
         row.addWidget(c_frames, 3)
 
+        # --- Radio link diagnostics ---
+        c_radio = Card("Radio Link", "cyan")
+        self.v_radio_queue = ValLabel(C_TEAL, "")
+        self.v_radio_peak  = ValLabel(C_TEAL, "")
+        self.v_radio_drop  = ValLabel(C_OK,   "")
+        self.v_radio_loss  = ValLabel(C_OK,   "%")
+        self.v_radio_sent  = ValLabel(C_TEXT, "")
+        self.v_radio_int   = ValLabel(C_TEAL, "ms")
+        c_radio.add_row("TX Queue",   self.v_radio_queue)
+        c_radio.add_row("Peak Queue", self.v_radio_peak)
+        c_radio.add_row("Dropped",    self.v_radio_drop)
+        c_radio.add_hline()
+        c_radio.add_row("Drop (1m)",  self.v_radio_loss)
+        c_radio.add_row("Sent",       self.v_radio_sent)
+        c_radio.add_row("Send Gap",   self.v_radio_int)
+        c_radio.add_stretch()
+        row.addWidget(c_radio, 3)
+
         return row
 
     # ------------------------------------------------------------------ Loop
@@ -546,6 +582,7 @@ class TelemetryWindow(QWidget):
             s = self._state
             # Any CRC-valid frame counts as "receiving", even unknown IDs.
             s.last_packet = now
+            s.packets_decoded += 1
 
             if isinstance(parsed, GpsData):
                 s.gps = parsed
@@ -581,6 +618,9 @@ class TelemetryWindow(QWidget):
                 s.last_frame_front_vcu = now
             elif isinstance(parsed, MitsubaFrame0):
                 s.mitsuba0 = parsed
+            elif isinstance(parsed, RadioStats):
+                s.radio_stats = parsed
+                s.last_frame_radio = now
             elif isinstance(parsed, MpptData):
                 s.mppt[parsed.mppt_index] = parsed
 
@@ -598,6 +638,7 @@ class TelemetryWindow(QWidget):
             batt_t   = s.battery_temp
             batt_c   = s.battery_current
             mitsuba0 = s.mitsuba0
+            radio    = s.radio_stats
             mppt = dict(s.mppt)
 
             d.last_packet         = s.last_packet
@@ -606,6 +647,7 @@ class TelemetryWindow(QWidget):
             d.last_frame_steering = s.last_frame_steering
             d.last_frame_front_vcu = s.last_frame_front_vcu
             d.last_frame_rear_vcu  = s.last_frame_rear_vcu
+            d.packets_decoded      = s.packets_decoded
 
         d.link_connected = self._reader.is_connected()
 
@@ -633,6 +675,15 @@ class TelemetryWindow(QWidget):
         if mitsuba0 is not None:
             d.motor_voltage = mitsuba0.battery_voltage
             d.motor_current = mitsuba0.battery_current
+
+        # ── Radio link diagnostics ─────────────────────────────────────
+        if radio is not None:
+            d.radio_queue_used     = radio.queue_used
+            d.radio_queue_capacity = radio.queue_capacity
+            d.radio_queue_high     = radio.queue_high_water
+            d.radio_dropped        = radio.dropped
+            d.radio_sent           = radio.sent
+            d.radio_interval_ms    = radio.mean_interval_ms
 
         # ── MPPTs (mppt_index 1/2/3 -> cards 1/2/3) ────────────────────
         for n, m in mppt.items():
@@ -844,6 +895,67 @@ class TelemetryWindow(QWidget):
             f"color:{name_color}; font-size:16px; font-weight:700;"
             f" background:transparent; padding:4px 0;"
         )
+
+        # ── Radio link diagnostics ─────────────────────────────────────
+        cap = d.radio_queue_capacity
+        qu  = d.radio_queue_used
+        self.v_radio_queue.update_val(
+            "N/A" if qu is None else (f"{qu} / {cap}" if cap is not None else str(qu))
+        )
+        self.v_radio_peak.update_val(
+            "N/A" if d.radio_queue_high is None else
+            (f"{d.radio_queue_high} / {cap}" if cap is not None else str(d.radio_queue_high))
+        )
+
+        # Dropped frames: green at zero, red once the radio starts shedding frames.
+        if d.radio_dropped is None:
+            self.v_radio_drop._color = C_LABEL
+            self.v_radio_drop.update_val("N/A")
+        else:
+            self.v_radio_drop._color = C_FAULT if d.radio_dropped > 0 else C_OK
+            self.v_radio_drop.update_val(f"{d.radio_dropped:,}")
+
+        # End-to-end drop rate over the last LOSS_WINDOW_S: of the frames the
+        # radio reports having sent in that window, how many never reached a
+        # successful local decode. Sampled once per fresh RadioStats snapshot.
+        sent, dec = d.radio_sent, d.packets_decoded
+        loss_pct = None
+        if sent is not None and dec is not None:
+            samples = self._loss_samples
+            if samples and sent < samples[-1][1]:
+                samples.clear()                      # radio rebooted (sent reset)
+            if not samples or sent != samples[-1][1]:
+                samples.append((now, sent, dec))     # only on a new sent snapshot
+            # Drop samples that have aged out of the window (always keep newest).
+            while len(samples) > 1 and samples[0][0] < now - LOSS_WINDOW_S:
+                samples.popleft()
+            if len(samples) >= 2:
+                sent_delta = samples[-1][1] - samples[0][1]
+                dec_delta  = samples[-1][2] - samples[0][2]
+                if sent_delta > 0:
+                    loss_pct = max(0.0, min(100.0, 100.0 * (sent_delta - dec_delta) / sent_delta))
+
+        if loss_pct is None:
+            self.v_radio_loss._color = C_LABEL
+            self.v_radio_loss.update_val("N/A")
+        else:
+            self.v_radio_loss._color = (
+                C_OK if loss_pct < 1.0 else C_STALE if loss_pct < 5.0 else C_FAULT
+            )
+            self.v_radio_loss.update_val(f"{loss_pct:.1f}")
+
+        self.v_radio_sent.update_val(
+            "N/A" if d.radio_sent is None else f"{d.radio_sent:,}"
+        )
+
+        # Mean send gap: 0 ms means the link has stalled.
+        gap = d.radio_interval_ms
+        if gap is None:
+            self.v_radio_int._color = C_TEAL
+            self.v_radio_int.update_val("N/A")
+        else:
+            self.v_radio_int._color = C_FAULT if gap == 0 else C_TEAL
+            self.v_radio_int.update_val(str(gap))
 
         # ── Last frame received ────────────────────────────────────────
         # Map node name → TelemetryData attribute

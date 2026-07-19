@@ -31,7 +31,7 @@ from app.payload_parsers import (
     ID_BMS_STATUS, ID_BATTERY_VOLTAGE, ID_BATTERY_TEMP, ID_BATTERY_CURRENT,
     ID_STEERING_REQUESTS, ID_STEERING_REQUESTS2, ID_FRONT_VCU_DRIVE, ID_SPEED,
     ID_MITSUBA_FRAME0, ID_MITSUBA_FRAME1, ID_MITSUBA_FRAME2,
-    MPPT_IDS,
+    MPPT_IDS, RADIO_STATS_ID,
 )
 
 LINK = os.environ.get("FAKE_PORT_LINK", "/tmp/ttyUSB0")
@@ -161,6 +161,24 @@ def mitsuba2_payload(t):
     return ID_MITSUBA_FRAME2, (0).to_bytes(5, "little")   # no errors
 
 
+def radio_stats_payload(t):
+    # Queue occupancy oscillates; dropped ticks up occasionally so the GUI's
+    # "Dropped" reading goes red. `enqueued`/`sent` track the real per-tick frame
+    # count so the collector's decoded-vs-sent drop rate reads ~0% (the PTY is
+    # lossless), like a healthy link. Counters grow monotonically with time.
+    frames_per_tick = len(PRODUCERS) + len(MPPT_IDS)
+    ticks = t * RATE_HZ
+    queue_used = int(4 + 3 * math.sin(t / 4.0)) & 0xFFFF   # ~1..7
+    high_water = 12
+    enqueued = int(ticks * frames_per_tick)
+    dropped = int(t / 5.0)                                  # a trickle of queue drops
+    sent = max(enqueued - dropped, 0)
+    mean_interval = 50
+    payload = struct.pack("<HBHIIIH", queue_used, 32, high_water,
+                          enqueued, dropped, sent, mean_interval)
+    return RADIO_STATS_ID, payload
+
+
 def mppt_payloads(t):
     """One combined 16-byte frame per MPPT: inA, inV, outA, outV (LE floats)."""
     frames = []
@@ -181,6 +199,7 @@ PRODUCERS = [
     battery_current_payload, steering_payload, steering2_payload,
     front_vcu_payload, speed_payload,
     mitsuba0_payload, mitsuba1_payload, mitsuba2_payload,
+    radio_stats_payload,
 ]
 
 

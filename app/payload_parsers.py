@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 # GPS (telemetry-internal, not part of the car CAN map)
 # ---------------------------------------------------------------------------
 
-GPS_PACKET_ID = 0x10000000   # telem-internal ID the firmware sends GPS under (21B <ddfB)
-
+GPS_PACKET_ID  = 0x10000000   # telem-internal ID the firmware sends GPS under (21B <ddfB)
+RADIO_STATS_ID = 0x10000001   # telem-internal ID (19B <HBHIIIH)
 
 @dataclass
 class GpsData:
@@ -360,13 +360,14 @@ def _parse_mitsuba_frame2(p: bytes) -> MitsubaFrame2:
 
 
 # ---------------------------------------------------------------------------
-# MPPT frame (telem-internal)
+# MPPT frame (repacked from CAN by the telemetry board)
 # ---------------------------------------------------------------------------
-# The firmware forwards each MPPT as a single 16-byte message: MPPT n is sent
-# under ID 0x10000000 + n (n = 1..3), carrying four little-endian floats:
-# input current, input voltage, output current, output voltage.
+# The firmware folds each MPPT's input/output CAN frames into a single 16-byte
+# radio packet tagged with the controller's base CAN id (0x600/0x610/0x620),
+# carrying four little-endian floats: input current, input voltage,
+# output current, output voltage.
 
-MPPT_IDS = {0x10000001: 1, 0x10000002: 2, 0x10000003: 3}   # can_id -> index
+MPPT_IDS = {0x600: 1, 0x610: 2, 0x620: 3}   # base can_id -> index
 
 
 @dataclass
@@ -382,6 +383,43 @@ class MpptData:
 def _parse_mppt_data(index: int, p: bytes) -> MpptData:
     in_a, in_v, out_a, out_v = struct.unpack_from("<ffff", p, 0)
     return MpptData(index, in_a, in_v, out_a, out_v)
+
+
+# ---------------------------------------------------------------------------
+# Radio-link diagnostics (telem-internal)
+# ---------------------------------------------------------------------------
+# The telemetry board reports the health of its own CAN->radio bridge under a
+# telem-internal ID. 19-byte little-endian packet (see [[radio_packet]]
+# RadioStatsPacket in Flare-Firmware/docs/can_messages.toml). Lets the ground
+# station see when CAN traffic outruns the radio (dropped climbing, queue
+# saturating).
+
+
+
+@dataclass
+class RadioStats:
+    """0x10000004 — radio-link health from the telemetry board's TX bridge."""
+    queue_used: int           # bytes 0-1,  uint16 — frames waiting in the TX queue now
+    queue_capacity: int       # byte 2,     uint8  — TX queue depth (32)
+    queue_high_water: int     # bytes 3-4,  uint16 — peak queue_used since boot
+    enqueued: int             # bytes 5-8,  uint32 — total frames queued since boot
+    dropped: int              # bytes 9-12, uint32 — total frames dropped (queue full)
+    sent: int                 # bytes 13-16, uint32 — total frames sent over UART
+    mean_interval_ms: int     # bytes 17-18, uint16 — mean gap between sent frames (0 = stalled)
+
+
+def _parse_radio_stats(p: bytes) -> RadioStats:
+    (queue_used, queue_capacity, queue_high_water,
+     enqueued, dropped, sent, mean_interval_ms) = struct.unpack_from("<HBHIIIH", p, 0)
+    return RadioStats(
+        queue_used=queue_used,
+        queue_capacity=queue_capacity,
+        queue_high_water=queue_high_water,
+        enqueued=enqueued,
+        dropped=dropped,
+        sent=sent,
+        mean_interval_ms=mean_interval_ms,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +447,9 @@ _PARSERS = {
 def _dispatch(msg_id: int, payload: bytes):
     if msg_id == GPS_PACKET_ID:
         return parse_gps_payload(payload)
+
+    if msg_id == RADIO_STATS_ID:
+        return _parse_radio_stats(payload)
 
     parser = _PARSERS.get(msg_id)
     if parser is not None:

@@ -16,7 +16,7 @@ from app.payload_parsers import (
     GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
     BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
     SteeringRequests, SteeringRequests2, FrontVcuDrive,
-    MitsubaFrame0, MitsubaFrame1, MitsubaFrame2, MpptData,
+    MitsubaFrame0, MitsubaFrame1, MitsubaFrame2, MpptData, RadioStats,
 )
 
 # Every decoded dataclass that should get its own table. Order is cosmetic.
@@ -24,7 +24,7 @@ PARSED_MESSAGES = [
     GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
     BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
     SteeringRequests, SteeringRequests2, FrontVcuDrive,
-    MitsubaFrame0, MitsubaFrame1, MitsubaFrame2, MpptData,
+    MitsubaFrame0, MitsubaFrame1, MitsubaFrame2, MpptData, RadioStats,
 ]
 
 

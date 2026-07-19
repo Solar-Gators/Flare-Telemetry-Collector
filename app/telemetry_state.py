@@ -6,7 +6,7 @@ from app.payload_parsers import (
     GpsData, KillSwitch, RearVcuStatus, SupplementalBattery,
     BmsStatus, BatteryVoltage, BatteryTemperature, BatteryCurrent,
     SteeringRequests, SteeringRequests2, FrontVcuDrive,
-    MitsubaFrame0,
+    MitsubaFrame0, RadioStats,
 )
 
 
@@ -34,6 +34,9 @@ class TelemetryState:
     # Motor controller (Mitsuba primary status frame)
     mitsuba0: Optional[MitsubaFrame0] = None
 
+    # Radio-link diagnostics (telemetry board's CAN->radio bridge)
+    radio_stats: Optional[RadioStats] = None
+
     # MPPTs (MpptData), keyed by mppt_index (1, 2, 3)
     mppt: dict = field(default_factory=dict)
 
@@ -43,5 +46,10 @@ class TelemetryState:
     last_frame_steering: Optional[float] = None
     last_frame_front_vcu: Optional[float] = None
     last_frame_rear_vcu: Optional[float] = None
+    last_frame_radio: Optional[float] = None
 
     last_packet: Optional[float] = None     # time.monotonic() of last valid frame (any ID)
+
+    # Running count of COBS+CRC-valid frames we've decoded (any ID) since start.
+    # Compared against RadioStats.sent to estimate end-to-end packet loss.
+    packets_decoded: int = 0
