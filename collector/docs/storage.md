@@ -33,21 +33,43 @@ dedupe server-side.
 | --- | --- | --- |
 | `FLARE_STORAGE_ENABLED` | `1` | Set to `0`/`false`/`off` to disable local storage entirely. |
 | `FLARE_DB_PATH` | `data/telemetry.db` | Path to the local SQLite database. |
-| `FLARE_UPLOAD_BACKEND` | *(unset)* | Online backend: `jsonl` (test stub) or unset/`null` = no upload (rows accumulate locally). |
+| `FLARE_UPLOAD_BACKEND` | *(unset)* | Online backend: `rest` (telemetry website), `jsonl` (test stub), or unset/`null` = no upload (rows accumulate locally). |
 | `FLARE_UPLOAD_JSONL` | `data/uploaded.jsonl` | Output file for the `jsonl` test backend. |
+| `FLARE_UPLOAD_URL` | *(unset)* | `rest` backend: full ingest URL, e.g. `https://telemetry.example.org/api/ingest`. Required for `rest`. |
+| `FLARE_UPLOAD_TOKEN` | *(unset)* | `rest` backend: bearer token sent as `Authorization: Bearer …`; must match the server's `FLARE_INGEST_TOKEN`. |
 
 With no upload backend configured, frames still persist locally forever with
 `synced = 0`, ready to offload once a real backend is wired.
 
+### `rest` backend
+
+Store-and-forward to the telemetry website (`../server/`). The uploader decodes
+each frame and sends records tagged with the shared catalog's message/field names
+(`shared/can_messages.toml`, via `app/upload_map.py`), plus the raw payload hex so
+nothing is lost. Each record carries a stable id `"{session_uuid}:{frame_id}"` so
+re-uploads dedupe server-side. Example:
+
+```bash
+FLARE_UPLOAD_BACKEND=rest \
+FLARE_UPLOAD_URL=https://telemetry.example.org/api/ingest \
+FLARE_UPLOAD_TOKEN=super-secret-token \
+    ../.venv/bin/python -m app.gui
+```
+
+The uploaded record shape is documented in `../server/README.md`.
+
 ## Quick test (no hardware)
+
+Run these from the `collector/` directory (the shared `.venv` lives one level up
+at the repo root):
 
 ```bash
 # terminal 1 — fake 10 Hz telemetry
-.venv/bin/python tools/fake_radio.py
+../.venv/bin/python tools/fake_radio.py
 
 # terminal 2 — run the dashboard against it, offloading to a JSONL file
 FLARE_SERIAL_PORT=/tmp/ttyUSB0 FLARE_UPLOAD_BACKEND=jsonl \
-    .venv/bin/python -m app.gui
+    ../.venv/bin/python -m app.gui
 
 # inspect
 sqlite3 data/telemetry.db \

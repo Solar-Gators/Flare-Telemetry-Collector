@@ -1,0 +1,5 @@
+# Optional dev/test tooling for the collector.
+#   ../.venv/bin/pip install -r requirements-dev.txt
+# The tests also run standalone without pytest:
+#   ../.venv/bin/python tests/test_upload_map.py
+pytest~=8.0

@@ -1,5 +1,10 @@
-# Python virtual environment
-.venv/
+# Secrets / local env
+.env
+server/.env
+
+# Python virtual environment (match dirs AND the collector/.venv symlink:
+# no trailing slash so a symlink named .venv is ignored too)
+.venv
 venv/
 
 # Python cache

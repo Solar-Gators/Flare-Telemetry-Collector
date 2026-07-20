@@ -476,6 +476,8 @@ class TelemetryWindow(QWidget):
         # last LOSS_WINDOW_S. The counters' different epochs (radio boot vs GUI
         # start) cancel because loss is a delta between two samples.
         self._loss_samples = deque()
+        # monotonic() when the link last became NOMINAL; None whenever it isn't.
+        self._nominal_since: float | None = None
         self.setWindowTitle("Flare Telemetry Dashboard")
         self.setStyleSheet(QSS)
         self._build_ui()
@@ -567,6 +569,14 @@ class TelemetryWindow(QWidget):
         lay.addWidget(self._lbl_hint)
         lay.addStretch()
 
+        # Continuous-nominal uptime, resets whenever the link drops from NOMINAL.
+        self.lbl_uptime = QLabel("UP --:--")
+        self.lbl_uptime.setStyleSheet(
+            f"color:{C_LABEL}; font-size:14px; font-weight:700;"
+            f" letter-spacing:2px; background:transparent; padding-right:18px;"
+        )
+        lay.addWidget(self.lbl_uptime)
+
         self.lbl_status = QLabel("● NOMINAL")
         self.lbl_status.setStyleSheet(
             f"color:{C_OK}; font-size:{SZ_HEADER}px; font-weight:700;"
@@ -637,13 +647,17 @@ class TelemetryWindow(QWidget):
 
         return row
 
-    # Row 2 — MPPT 1 | MPPT 2 | MPPT 3 | Total Solar
+    # Row 2 — MPPT Front | MPPT Middle | MPPT Back | Total Solar
+    # mppt_index 1/2/3 map to physical positions front/back/middle.
+    MPPT_NAMES = {1: "Front", 2: "Back", 3: "Middle"}
+
     def _make_row2(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(7)
 
-        for n in (1, 2, 3):
-            c = Card(f"MPPT {n}", "yellow")
+        # Display order Front, Middle, Back (data indices 1, 3, 2).
+        for n in (1, 3, 2):
+            c = Card(f"MPPT {self.MPPT_NAMES[n]}", "yellow")
             iv  = ValLabel(C_YELLOW, "V")
             ic  = ValLabel(C_YELLOW, "A")
             ov  = ValLabel(C_YELLOW, "V")
@@ -1037,6 +1051,26 @@ class TelemetryWindow(QWidget):
             f"color:{color}; font-size:{SZ_HEADER}px; font-weight:700;"
             f" letter-spacing:2px; background:transparent;"
         )
+
+        # Nominal-uptime: count up while NOMINAL, reset the instant we leave it.
+        if text == ST_NOMINAL[0]:
+            if self._nominal_since is None:
+                self._nominal_since = now
+            secs = int(now - self._nominal_since)
+            h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+            up = f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            self.lbl_uptime.setText(f"UP {up}")
+            self.lbl_uptime.setStyleSheet(
+                f"color:{C_OK}; font-size:14px; font-weight:700;"
+                f" letter-spacing:2px; background:transparent; padding-right:18px;"
+            )
+        else:
+            self._nominal_since = None
+            self.lbl_uptime.setText("UP --:--")
+            self.lbl_uptime.setStyleSheet(
+                f"color:{C_LABEL}; font-size:14px; font-weight:700;"
+                f" letter-spacing:2px; background:transparent; padding-right:18px;"
+            )
 
         # ── Main battery ───────────────────────────────────────────────
         f3 = lambda v: "N/A" if v is None else f"{v:.3f}"   # cell volts, mV-ish

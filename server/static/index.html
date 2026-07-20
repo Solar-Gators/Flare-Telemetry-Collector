@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flare Telemetry</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>🐊 FLARE TELEMETRY</h1>
+    <span id="live" class="live-pill"><span class="dot"></span><span id="live-text">connecting…</span></span>
+    <div class="spacer"></div>
+    <label class="muted" for="session">View</label>
+    <select id="session"><option value="">● Live</option></select>
+    <button id="logout" class="ghost" type="button">Sign out</button>
+  </header>
+
+  <main>
+    <section class="card" style="grid-column: 1 / -1;">
+      <h2>Position</h2>
+      <div id="map"></div>
+    </section>
+
+    <section class="card" style="grid-column: 1 / -1;">
+      <h2>Live values</h2>
+      <div id="tiles" class="tiles"></div>
+    </section>
+
+    <div class="charts" id="charts">
+      <div class="section-title">Trends</div>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

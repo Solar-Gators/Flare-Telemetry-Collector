@@ -16,8 +16,12 @@ import socket
 import sqlite3
 import threading
 import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlparse
 
-from app import parsed_tables
+from app import parsed_tables, upload_map
+from app.payload_parsers import parse_payload
 from app.storage import _configure_connection
 
 logger = logging.getLogger(__name__)
@@ -67,6 +71,45 @@ class JsonlFileBackend(TelemetryBackend):
             os.fsync(f.fileno())
 
 
+class RestApiBackend(TelemetryBackend):
+    """Store-and-forward to the telemetry website's ingest endpoint over HTTPS.
+
+    POSTs each batch as JSON to `<url>` with an optional bearer token. Uses only
+    the standard library (urllib) so the collector gains no new dependency. Any
+    non-2xx response or network error raises, leaving the rows un-synced for the
+    uploader loop to retry with backoff.
+    """
+
+    def __init__(self, url: str, token: str | None = None, timeout: float = 10.0):
+        self.url = url
+        self.token = token
+        self.timeout = timeout
+        parsed = urlparse(url)
+        self._host = parsed.hostname
+        self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    def is_reachable(self) -> bool:
+        if not self._host:
+            return False
+        return tcp_reachable(self._host, self._port, timeout=3.0)
+
+    def upload(self, batch: list[dict]) -> None:
+        body = json.dumps({"records": batch}).encode("utf-8")
+        req = urllib.request.Request(self.url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                # urlopen already raises on 4xx/5xx; guard anyway.
+                if resp.status // 100 != 2:
+                    raise RuntimeError(f"ingest returned HTTP {resp.status}")
+        except urllib.error.HTTPError as err:
+            raise RuntimeError(f"ingest HTTP {err.code}: {err.reason}") from err
+        except urllib.error.URLError as err:
+            raise RuntimeError(f"ingest unreachable: {err.reason}") from err
+
+
 def tcp_reachable(host: str, port: int, timeout: float = 3.0) -> bool:
     """Best-effort connectivity probe for real network backends."""
     try:
@@ -90,6 +133,15 @@ def make_backend() -> TelemetryBackend | None:
         path = os.environ.get("FLARE_UPLOAD_JSONL") or os.path.join("data", "uploaded.jsonl")
         logger.info("uploader: JSONL backend -> %s", path)
         return JsonlFileBackend(path)
+    if name == "rest":
+        url = os.environ.get("FLARE_UPLOAD_URL", "").strip()
+        if not url:
+            logger.error("uploader: FLARE_UPLOAD_BACKEND=rest but FLARE_UPLOAD_URL "
+                         "is unset; uploads disabled")
+            return None
+        token = os.environ.get("FLARE_UPLOAD_TOKEN") or None
+        logger.info("uploader: REST backend -> %s", url)
+        return RestApiBackend(url, token)
     logger.warning("uploader: unknown FLARE_UPLOAD_BACKEND=%r, uploads disabled", name)
     return None
 
@@ -170,11 +222,9 @@ class UploaderThread:
     def _drain_once(self, conn: sqlite3.Connection) -> int:
         """Upload one batch of un-synced frames. Returns rows sent."""
         rows = conn.execute(
-            "SELECT f.id, s.session_uuid, f.ts_utc, f.ts_mono, f.can_id, f.payload, "
-            "       g.latitude, g.longitude, g.speed, g.satellites "
+            "SELECT f.id, s.session_uuid, f.ts_utc, f.ts_mono, f.can_id, f.payload "
             "FROM frames f "
             "JOIN sessions s ON s.id = f.session_id "
-            "LEFT JOIN gps_data g ON g.frame_id = f.id "
             "WHERE f.synced = 0 "
             "ORDER BY f.id LIMIT ?",
             (self._batch_size,),
@@ -199,23 +249,31 @@ class UploaderThread:
 
     @staticmethod
     def _to_record(row) -> dict:
-        (fid, suid, ts_utc, ts_mono, can_id, payload,
-         lat, lon, speed, sats) = row
+        """Build the JSON record for one frame, decoded into catalog names.
+
+        The raw payload is always included (lossless, re-decodable). When the CAN
+        id decodes to a known message, `msg_type` and `fields` carry the catalog's
+        message + field names (via app.upload_map), so the server and web frontend
+        render straight from shared/can_messages.toml with no mapping of their own.
+        """
+        fid, suid, ts_utc, ts_mono, can_id, payload = row
+        payload = bytes(payload)
         rec = {
             # Stable, idempotent id so re-uploads dedupe server-side.
-            "id":      f"{suid}:{fid}",
-            "ts_utc":  ts_utc,
-            "ts_mono": ts_mono,
-            "can_id":  can_id,
-            "payload": bytes(payload).hex(),
+            "id":           f"{suid}:{fid}",
+            "session_uuid": suid,
+            "ts_utc":       ts_utc,
+            "ts_mono":      ts_mono,
+            "can_id":       can_id,
+            "payload":      payload.hex(),
+            "msg_type":     None,
+            "fields":       None,
         }
-        if lat is not None:
-            rec["gps"] = {
-                "latitude":   lat,
-                "longitude":  lon,
-                "speed":      speed,
-                "satellites": sats,
-            }
+        parsed = parse_payload(can_id, payload)
+        if parsed is not None:
+            mapped = upload_map.to_upload(parsed)
+            if mapped is not None:
+                rec["msg_type"], rec["fields"] = mapped
         return rec
 
     def _wait(self, seconds: float):

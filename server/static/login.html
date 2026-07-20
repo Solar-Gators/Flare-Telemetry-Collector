@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flare Telemetry — Sign in</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-body">
+  <form id="login" class="login-card">
+    <h1>Flare Telemetry</h1>
+    <p class="muted">Solar Gators — team access</p>
+    <input id="password" type="password" placeholder="Team password" autofocus autocomplete="current-password" />
+    <button type="submit">Sign in</button>
+    <p id="error" class="error" hidden>Wrong password.</p>
+  </form>
+  <script>
+    const form = document.getElementById('login');
+    const err = document.getElementById('error');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const password = document.getElementById('password').value;
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) {
+        window.location = '/';
+      } else {
+        err.hidden = false;
+      }
+    });
+  </script>
+</body>
+</html>

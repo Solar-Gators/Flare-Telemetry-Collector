@@ -1,0 +1,15 @@
+# Build context is the repo root, but the server image only needs server/ + shared/.
+# Keep the collector half (and its large local telemetry.db) out of the image.
+collector/
+.venv/
+.git/
+**/__pycache__/
+**/*.pyc
+**/data/
+**/logs/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+server/.venv/
+server/data/
+.claude/
