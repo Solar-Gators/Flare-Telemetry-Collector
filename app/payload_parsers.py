@@ -367,7 +367,9 @@ def _parse_mitsuba_frame2(p: bytes) -> MitsubaFrame2:
 # carrying four little-endian floats: input current, input voltage,
 # output current, output voltage.
 
-MPPT_IDS = {0x600: 1, 0x610: 2, 0x620: 3}   # base can_id -> index
+# TEMP(revert): using old telem-internal MPPT IDs. Real base IDs are below.
+# MPPT_IDS = {0x600: 1, 0x610: 2, 0x620: 3}   # base can_id -> index
+MPPT_IDS = {0x10000001: 1, 0x10000002: 2, 0x10000003: 3}   # can_id -> index
 
 
 @dataclass
@@ -381,7 +383,7 @@ class MpptData:
 
 
 def _parse_mppt_data(index: int, p: bytes) -> MpptData:
-    in_a, in_v, out_a, out_v = struct.unpack_from("<ffff", p, 0)
+    in_v, in_a, out_v, out_a = struct.unpack_from("<ffff", p, 0)
     return MpptData(index, in_a, in_v, out_a, out_v)
 
 
@@ -448,8 +450,9 @@ def _dispatch(msg_id: int, payload: bytes):
     if msg_id == GPS_PACKET_ID:
         return parse_gps_payload(payload)
 
-    if msg_id == RADIO_STATS_ID:
-        return _parse_radio_stats(payload)
+    # TEMP(revert): radio stats ignored so 0x10000001 decodes as MPPT 1 again.
+    # if msg_id == RADIO_STATS_ID:
+    #     return _parse_radio_stats(payload)
 
     parser = _PARSERS.get(msg_id)
     if parser is not None:

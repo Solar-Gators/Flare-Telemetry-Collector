@@ -199,7 +199,7 @@ PRODUCERS = [
     battery_current_payload, steering_payload, steering2_payload,
     front_vcu_payload, speed_payload,
     mitsuba0_payload, mitsuba1_payload, mitsuba2_payload,
-    radio_stats_payload,
+    # radio_stats_payload,   # TEMP(revert): ignoring radio stats
 ]
 
 
