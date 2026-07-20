@@ -1,15 +1,19 @@
 import os
 import sys
+import json
+import math
 import time
 import logging
 import threading
 from collections import deque
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QFrame, QSizePolicy
+    QLabel, QFrame, QSizePolicy, QStackedWidget
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import Qt, QTimer, QPointF, QRectF, QEvent
+from PySide6.QtGui import QColor, QPalette, QPainter, QPen, QBrush, QImage
+
+from app.mercator import lonlat_to_world_px
 
 from app.serial_reader import SerialReader
 from app.payload_parsers import (
@@ -189,6 +193,196 @@ class Card(QFrame):
         self._vbox.addStretch(1)
 
 
+class TrackMap(QWidget):
+    """GPS track — plots the car's path + current position.
+
+    If a baked OpenStreetMap background is present (app/assets/track_map.*,
+    produced by tools/fetch_map.py), the trail is drawn over it in the map's
+    fixed Web-Mercator frame so the line lines up with the streets. If no map
+    asset exists, it falls back to auto-fitting the trail into the widget
+    (longitude aspect-corrected by cos(lat), y flipped so north is up).
+    """
+
+    MAX_POINTS = 5000               # rolling window; keeps memory/paint bounded
+    MIN_MOVE   = 1e-6               # ° — ignore fixes that didn't meaningfully move
+    MARGIN     = 12                 # px padding inside the widget (auto-fit mode)
+    MIN_SPAN   = 1e-4               # ° — fallback half-span for a lone/still fix
+    PAN_UP_FRAC = 0.10              # bias the map crop upward by up to 10% of height
+
+    ASSET_DIR  = os.path.join(os.path.dirname(__file__), "assets")
+
+    def __init__(self):
+        super().__init__()
+        self._points: deque[tuple[float, float]] = deque(maxlen=self.MAX_POINTS)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumHeight(80)
+
+        # Baked map background (optional — falls back to auto-fit if absent).
+        self._map_img: QImage | None = None
+        self._map_zoom: int | None = None
+        self._map_origin: tuple[float, float] | None = None   # world-px of img top-left
+        self._load_map()
+
+        # Position marker (optional — falls back to a dot if absent).
+        marker_path = os.path.join(self.ASSET_DIR, "gator.png")
+        m = QImage(marker_path) if os.path.exists(marker_path) else None
+        self._marker: QImage | None = m if (m is not None and not m.isNull()) else None
+
+    def _load_map(self):
+        meta_path = os.path.join(self.ASSET_DIR, "track_map.json")
+        if not os.path.exists(meta_path):
+            return
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            img = QImage(os.path.join(self.ASSET_DIR, meta["image"]))
+            if img.isNull():
+                logging.warning("track map image failed to load: %s", meta["image"])
+                return
+            self._map_img = img
+            self._map_zoom = int(meta["zoom"])
+            self._map_origin = (float(meta["origin_px"][0]), float(meta["origin_px"][1]))
+        except Exception:
+            logging.exception("failed to load track map background")
+
+    def add_point(self, lat: float, lon: float):
+        # Reject implausible / no-fix data: out-of-range, or the near-origin box
+        # (both coords within ±20°) where GPS parks 0,0-ish values before a lock.
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return
+        if -20.0 <= lat <= 20.0 and -20.0 <= lon <= 20.0:
+            return
+        if self._points:
+            plat, plon = self._points[-1]
+            if abs(lat - plat) < self.MIN_MOVE and abs(lon - plon) < self.MIN_MOVE:
+                return                      # same spot — don't pile up identical fixes
+        self._points.append((lat, lon))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(BG_PANEL))
+
+        if self._map_img is not None:
+            self._paint_with_map(p, w, h)
+        else:
+            self._paint_autofit(p, w, h)
+
+        # Thin border so the cell still reads as part of the grid.
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QColor(BORDER))
+        p.drawRect(0, 0, w - 1, h - 1)
+
+    def _draw_trail(self, p: QPainter, screen_pts: list[QPointF], line_color: str):
+        """Draw the polyline trail + current-position marker for either mode."""
+        pen = QPen(QColor(line_color))
+        pen.setWidthF(2.5)
+        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        if len(screen_pts) > 1:
+            for a, b in zip(screen_pts, screen_pts[1:]):
+                p.drawLine(a, b)
+
+        self._draw_marker(p, screen_pts[-1])
+
+    # Marker height scales with the widget width (small on the dash cell, capped
+    # on the big full-screen map).
+    MARKER_FRAC = 0.05
+    MARKER_MIN  = 14.0
+    MARKER_MAX  = 46.0
+
+    def _draw_marker(self, p: QPainter, pt: QPointF):
+        """Current position: the Albert marker if available, else a dot + ring."""
+        if self._marker is not None and not self._marker.isNull():
+            mh = min(self.MARKER_MAX, max(self.MARKER_MIN, self.width() * self.MARKER_FRAC))
+            mw = mh * self._marker.width() / self._marker.height()
+            # Centre Albert on the fix so the trail runs through him.
+            p.drawImage(QRectF(pt.x() - mw / 2.0, pt.y() - mh / 2.0, mw, mh), self._marker)
+            return
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(C_BLUE)))
+        p.drawEllipse(pt, 5.0, 5.0)
+        p.setBrush(Qt.NoBrush)
+        ring = QPen(QColor(C_TEXT))
+        ring.setWidthF(1.5)
+        p.setPen(ring)
+        p.drawEllipse(pt, 8.0, 8.0)
+
+    def _paint_with_map(self, p: QPainter, w: int, h: int):
+        img = self._map_img
+        iw, ih = img.width(), img.height()
+        scale = max(w / iw, h / ih)                 # cover: fill the whole cell
+        dw, dh = iw * scale, ih * scale
+        ox = (w - dw) / 2.0
+        # Bias the vertical crop upward so the track sits a little higher, but
+        # never past the cropped margin (so no blank edge appears).
+        margin_y = max((dh - h) / 2.0, 0.0)
+        pan = min(self.PAN_UP_FRAC * h, margin_y)
+        oy = (h - dh) / 2.0 - pan
+        p.drawImage(QRectF(ox, oy, dw, dh), img)
+
+        x0px, y0px = self._map_origin
+
+        def to_screen(lat, lon):
+            wx, wy = lonlat_to_world_px(lat, lon, self._map_zoom)
+            return QPointF(ox + (wx - x0px) * scale, oy + (wy - y0px) * scale)
+
+        p.setClipRect(0, 0, w, h)                   # keep the trail inside the cell
+        if self._points:
+            # Red reads well over light OSM tiles (purple would wash out).
+            self._draw_trail(p, [to_screen(lat, lon) for lat, lon in self._points], C_RED)
+        p.setClipping(False)
+
+        if not self._points:
+            p.setPen(QColor(C_TEXT))
+            p.drawText(self.rect(), Qt.AlignCenter, "ACQUIRING GPS…")
+
+    def _paint_autofit(self, p: QPainter, w: int, h: int):
+        if not self._points:
+            p.setPen(QColor(C_LABEL))
+            p.drawText(self.rect(), Qt.AlignCenter, "ACQUIRING GPS…")
+            return
+
+        lats = [lat for lat, _ in self._points]
+        lons = [lon for _, lon in self._points]
+        min_lat, max_lat = min(lats), max(lats)
+        min_lon, max_lon = min(lons), max(lons)
+        mean_lat = (min_lat + max_lat) / 2.0
+
+        # Aspect-correct longitude: a degree of longitude is cos(lat)× a degree
+        # of latitude. Work in a local planar space (x = lon·cos(lat), y = lat).
+        cos_lat = max(math.cos(math.radians(mean_lat)), 1e-6)
+
+        def to_xy(lat, lon):
+            return (lon * cos_lat, lat)
+
+        pts_xy = [to_xy(lat, lon) for lat, lon in self._points]
+        xs = [x for x, _ in pts_xy]
+        ys = [y for _, y in pts_xy]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        span_x = max(max_x - min_x, self.MIN_SPAN * cos_lat)
+        span_y = max(max_y - min_y, self.MIN_SPAN)
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+
+        avail_w = max(w - 2 * self.MARGIN, 1)
+        avail_h = max(h - 2 * self.MARGIN, 1)
+        # Single uniform scale preserves aspect ratio; centered in the widget.
+        scale = min(avail_w / span_x, avail_h / span_y)
+
+        def to_screen(x, y):
+            sx = w / 2.0 + (x - cx) * scale
+            sy = h / 2.0 - (y - cy) * scale        # flip y so north is up
+            return QPointF(sx, sy)
+
+        self._draw_trail(p, [to_screen(x, y) for x, y in pts_xy], C_PURPLE)
+
+
 # ---------------------------------------------------------------------------
 # Telemetry data store  — populate from your CAN/UDP/serial thread
 # ---------------------------------------------------------------------------
@@ -200,6 +394,8 @@ class TelemetryData:
     # Main battery
     main_batt_voltage: float | None = None
     main_batt_current: float | None = None
+    main_batt_high_cell_voltage: float | None = None
+    main_batt_low_cell_voltage: float | None  = None
     main_batt_high_cell_temp: float | None = None
     main_batt_avg_cell_temp: float | None  = None
 
@@ -320,14 +516,30 @@ class TelemetryWindow(QWidget):
         root.setSpacing(0)
         root.addWidget(self._make_header())
 
-        body = QVBoxLayout()
+        # Page 0 — the dashboard grid.
+        dash = QWidget()
+        body = QVBoxLayout(dash)
         body.setContentsMargins(8, 8, 8, 8)
         body.setSpacing(7)
         # Stretch weights: row1 and row2 share space equally; row3 is shorter
         body.addLayout(self._make_row1(), 38)
         body.addLayout(self._make_row2(), 38)
         body.addLayout(self._make_row3(), 24)
-        root.addLayout(body, 1)
+
+        # Page 1 — a full-screen live map (its own TrackMap, same trail).
+        map_page = QWidget()
+        map_lay = QVBoxLayout(map_page)
+        map_lay.setContentsMargins(0, 0, 0, 0)
+        map_lay.setSpacing(0)
+        self._track_map_full = TrackMap()
+        map_lay.addWidget(self._track_map_full)
+
+        # Both maps are fed the same fixes in _refresh; Tab swaps the page.
+        self._maps = [self._track_map, self._track_map_full]
+        self._stack = QStackedWidget()
+        self._stack.addWidget(dash)
+        self._stack.addWidget(map_page)
+        root.addWidget(self._stack, 1)
 
     # Header bar
     def _make_header(self) -> QWidget:
@@ -340,12 +552,19 @@ class TelemetryWindow(QWidget):
         lay.setContentsMargins(16, 0, 16, 0)
 
 
-        ttl = QLabel("FLARE LIVE TELEMETRY")
-        ttl.setStyleSheet(
+        self._lbl_title = QLabel("FLARE LIVE TELEMETRY")
+        self._lbl_title.setStyleSheet(
             f"color:{C_BLUE}; font-size:{SZ_HEADER}px; font-weight:700;"
             f" letter-spacing:4px; background:transparent;"
         )
-        lay.addWidget(ttl)
+        lay.addWidget(self._lbl_title)
+
+        self._lbl_hint = QLabel("TAB ⇄ MAP")
+        self._lbl_hint.setStyleSheet(
+            f"color:{C_TITLE}; font-size:12px; font-weight:700;"
+            f" letter-spacing:2px; background:transparent; padding-left:14px;"
+        )
+        lay.addWidget(self._lbl_hint)
         lay.addStretch()
 
         self.lbl_status = QLabel("● NOMINAL")
@@ -361,32 +580,32 @@ class TelemetryWindow(QWidget):
         row = QHBoxLayout()
         row.setSpacing(7)
 
-        # --- Main battery ---
+        # --- Main battery (now also carries cell voltages + supplemental) ---
         c = Card("Main Battery", "blue")
-        self.v_mb_v  = ValLabel(C_BLUE,  "V")
-        self.v_mb_a  = ValLabel(C_BLUE,  "A")
-        self.v_mb_w  = ValLabel(C_BLUE,  "W")
-        self.v_mb_ht = ValLabel(C_AMBER, "°C")
-        self.v_mb_at = ValLabel(C_TEXT,  "°C")
+        self.v_mb_v   = ValLabel(C_BLUE,  "V")
+        self.v_mb_a   = ValLabel(C_BLUE,  "A")
+        self.v_mb_w   = ValLabel(C_BLUE,  "W")
+        self.v_mb_hcv = ValLabel(C_GREEN, "V")
+        self.v_mb_lcv = ValLabel(C_AMBER, "V")
+        self.v_mb_ht  = ValLabel(C_AMBER, "°C")
+        self.v_mb_at  = ValLabel(C_TEXT,  "°C")
+        self.v_sb_v   = ValLabel(C_TEAL,  "V")
+        self.v_sb_a   = ValLabel(C_TEAL,  "A")
+        self.v_sb_w   = ValLabel(C_TEAL,  "W")
         c.add_row("Voltage",             self.v_mb_v)
         c.add_row("Current",             self.v_mb_a)
         c.add_row("Power",               self.v_mb_w)
         c.add_hline()
+        c.add_row("High Cell Voltage",   self.v_mb_hcv)
+        c.add_row("Low Cell Voltage",    self.v_mb_lcv)
         c.add_row("High Cell Temp",      self.v_mb_ht)
         c.add_row("Average Cell Temp",   self.v_mb_at)
+        c.add_hline()
+        c.add_row("Supp Voltage",        self.v_sb_v)
+        c.add_row("Supp Current",        self.v_sb_a)
+        c.add_row("Supp Power",          self.v_sb_w)
         c.add_stretch()
         row.addWidget(c, 5)
-
-        # --- Supplemental battery ---
-        c2 = Card("Supplemental Battery", "teal")
-        self.v_sb_v = ValLabel(C_TEAL, "V")
-        self.v_sb_a = ValLabel(C_TEAL, "A")
-        self.v_sb_w = ValLabel(C_TEAL, "W")
-        c2.add_row("Voltage", self.v_sb_v)
-        c2.add_row("Current", self.v_sb_a)
-        c2.add_row("Power",   self.v_sb_w)
-        c2.add_stretch()
-        row.addWidget(c2, 4)
 
         # --- Motor controller ---
         c3 = Card("Motor Controller", "amber")
@@ -468,32 +687,21 @@ class TelemetryWindow(QWidget):
         row = QHBoxLayout()
         row.setSpacing(7)
 
-        # --- GPS ---
-        c_gps = Card("GPS / Position", "purple")
-        self.v_lat  = ValLabel(C_PURPLE, "° N")
-        self.v_lon  = ValLabel(C_PURPLE, "° W")
-        self.v_sats = ValLabel(C_AMBER,  "sats")
-        c_gps.add_row("Latitude",   self.v_lat)
-        c_gps.add_row("Longitude",  self.v_lon)
-        c_gps.add_hline()
-        c_gps.add_row("Satellites", self.v_sats)
-        c_gps.add_stretch()
-        row.addWidget(c_gps, 3)
+        # --- GPS track map (fills the whole cell, no card chrome/labels) ---
+        self._track_map = TrackMap()
+        row.addWidget(self._track_map, 3)
 
-        # --- Contactors + fault status ---
+        # --- Contactors, fault status + BMS fault code (combined) ---
         c_cont = Card("Contactors & Status", "green")
         self.v_arr_cont = ValLabel(C_RED, "")
         self.v_bms_cont = ValLabel(C_RED, "")
         self.v_kill     = ValLabel(C_OK,  "")
         c_cont.add_row("Array Contactor", self.v_arr_cont)
         c_cont.add_row("BMS Contactor",   self.v_bms_cont)
-        c_cont.add_hline()
         c_cont.add_row("Fault Status",    self.v_kill)
-        c_cont.add_stretch()
-        row.addWidget(c_cont, 3)
+        c_cont.add_hline()
 
-        # --- BMS fault code ---
-        c_bms = Card("BMS Fault Code", "red")
+        # BMS fault code (merged in from its own card).
         self.v_bms_hex  = ValLabel(C_RED, "")
         self.v_bms_name = QLabel("NONE")
         self.v_bms_name.setAlignment(Qt.AlignCenter)
@@ -513,12 +721,11 @@ class TelemetryWindow(QWidget):
         ref.setStyleSheet(
             f"color:{C_TITLE}; font-size:11px; background:transparent; padding-top:2px;"
         )
-        c_bms.add_row("Code", self.v_bms_hex)
-        c_bms.add_widget(self.v_bms_name)
-        c_bms.add_hline()
-        c_bms.add_widget(ref)
-        c_bms.add_stretch()
-        row.addWidget(c_bms, 4)
+        c_cont.add_row("BMS Fault Code", self.v_bms_hex)
+        c_cont.add_widget(self.v_bms_name)
+        c_cont.add_widget(ref)
+        c_cont.add_stretch()
+        row.addWidget(c_cont, 4)
 
         # --- Last frame received times ---
         c_frames = Card("Last Frame Received", "gray")
@@ -660,6 +867,8 @@ class TelemetryWindow(QWidget):
         # ── Main battery (BMS) ─────────────────────────────────────────
         if batt_v is not None:
             d.main_batt_voltage = batt_v.total_voltage
+            d.main_batt_high_cell_voltage = batt_v.high_cell_voltage
+            d.main_batt_low_cell_voltage  = batt_v.low_cell_voltage
         if batt_c is not None:
             d.main_batt_current = batt_c.current
         if batt_t is not None:
@@ -780,6 +989,20 @@ class TelemetryWindow(QWidget):
         else:
             self._log_overlay.hide()
 
+    def _toggle_view(self):
+        idx = 1 - self._stack.currentIndex()
+        self._stack.setCurrentIndex(idx)
+        on_map = idx == 1
+        self._lbl_title.setText("FLARE LIVE MAP" if on_map else "FLARE LIVE TELEMETRY")
+        self._lbl_hint.setText("TAB ⇄ DASH" if on_map else "TAB ⇄ MAP")
+
+    def event(self, e):
+        # Intercept Tab (and Shift+Tab) before Qt uses it for focus traversal.
+        if e.type() == QEvent.KeyPress and e.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+            self._toggle_view()
+            return True
+        return super().event(e)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_L:
             self._toggle_logs()
@@ -816,10 +1039,13 @@ class TelemetryWindow(QWidget):
         )
 
         # ── Main battery ───────────────────────────────────────────────
+        f3 = lambda v: "N/A" if v is None else f"{v:.3f}"   # cell volts, mV-ish
         mb_pwr = prod(d.main_batt_voltage, d.main_batt_current)
         self.v_mb_v.update_val(f1(d.main_batt_voltage))
         self.v_mb_a.update_val(f1(d.main_batt_current))
         self.v_mb_w.update_val(f0(mb_pwr))
+        self.v_mb_hcv.update_val(f3(d.main_batt_high_cell_voltage))
+        self.v_mb_lcv.update_val(f3(d.main_batt_low_cell_voltage))
         self.v_mb_ht.update_val(f1(d.main_batt_high_cell_temp))
         self.v_mb_at.update_val(f1(d.main_batt_avg_cell_temp))
 
@@ -857,10 +1083,10 @@ class TelemetryWindow(QWidget):
             getattr(self, f"v_m{n}_op").update_val(f0(op))
         self.v_solar.setText(f"{total_solar:.0f}" if have_solar else "N/A")
 
-        # ── GPS ────────────────────────────────────────────────────────
-        self.v_lat.update_val("N/A" if d.gps_lat is None else f"{abs(d.gps_lat):.4f}")
-        self.v_lon.update_val("N/A" if d.gps_lon is None else f"{abs(d.gps_lon):.4f}")
-        self.v_sats.update_val("N/A" if d.gps_sats is None else str(d.gps_sats))
+        # ── GPS track map ──────────────────────────────────────────────
+        if d.gps_lat is not None and d.gps_lon is not None:
+            for m in self._maps:
+                m.add_point(d.gps_lat, d.gps_lon)
 
         # ── Contactors ─────────────────────────────────────────────────
         def cont(is_open):
