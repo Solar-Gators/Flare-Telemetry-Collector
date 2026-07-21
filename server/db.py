@@ -4,11 +4,12 @@
 # the CAN map: any message the collector uploads is stored without a schema change.
 # Idempotent on `uid` ("{session_uuid}:{frame_id}") so re-uploads dedupe.
 
+import math
 import os
 
 from sqlalchemy import (
     JSON, Column, Float, Index, Integer, MetaData, String, Table,
-    create_engine, insert, select, update,
+    create_engine, func, insert, select, text, update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -41,6 +42,8 @@ frames = Table(
     Column("payload", String),                         # raw hex (lossless)
     Index("idx_frames_type_ts", "msg_type", "ts_utc"),
     Index("idx_frames_session_ts", "session_uuid", "ts_utc"),
+    # Session-scoped, per-type time scans (history/replay of one session).
+    Index("idx_frames_session_type_ts", "session_uuid", "msg_type", "ts_utc"),
 )
 
 
@@ -53,6 +56,14 @@ def init_db() -> None:
         if parent:
             os.makedirs(parent, exist_ok=True)
     metadata.create_all(engine)
+    # create_all only adds indexes to brand-new tables; add the session/type/ts
+    # composite to an existing (prod) frames table too. Idempotent on both
+    # dialects. Not CONCURRENTLY — a one-time brief lock at startup is fine here.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_frames_session_type_ts "
+            "ON frames (session_uuid, msg_type, ts_utc)"
+        ))
 
 
 def _insert_ignore(rows: list[dict]):
@@ -149,37 +160,215 @@ def recent_frames(limit: int = 1000) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def history(session_uuid: str | None, msg_type: str | None,
+def history(session_uuid: str | list[str] | None, msg_type: str | None,
             since: float | None, until: float | None,
             limit: int = 5000) -> list[dict]:
-    q = select(frames.c.ts_utc, frames.c.fields)
-    if session_uuid:
-        q = q.where(frames.c.session_uuid == session_uuid)
-    if msg_type:
-        q = q.where(frames.c.msg_type == msg_type)
-    if since is not None:
-        q = q.where(frames.c.ts_utc >= since)
-    if until is not None:
-        q = q.where(frames.c.ts_utc <= until)
+    q = _apply_filters(select(frames.c.ts_utc, frames.c.fields),
+                       session_uuid, msg_type, since, until)
     q = q.order_by(frames.c.ts_utc.asc()).limit(limit)
     with engine.begin() as conn:
         rows = conn.execute(q).mappings().all()
     return [{"ts_utc": r["ts_utc"], "fields": r["fields"]} for r in rows]
 
 
-def track(session_uuid: str | None, limit: int = 20000) -> list[dict]:
-    """GPS points for the map polyline: [{ts_utc, lat, lon, speed}]."""
+def _norm_sessions(s) -> list[str] | None:
+    """Accept a single uuid, a list of them, or None -> list | None.
+
+    Sessions are merged into logical "runs" for display (see main.py), so reads
+    can span several session_uuids at once.
+    """
+    if not s:
+        return None
+    if isinstance(s, str):
+        return [s]
+    out = [x for x in s if x]
+    return out or None
+
+
+def _apply_filters(q, session_uuid, msg_type, since, until):
+    sessions_ = _norm_sessions(session_uuid)
+    if sessions_:
+        q = (q.where(frames.c.session_uuid == sessions_[0]) if len(sessions_) == 1
+             else q.where(frames.c.session_uuid.in_(sessions_)))
+    if msg_type:
+        q = q.where(frames.c.msg_type == msg_type)
+    if since is not None:
+        q = q.where(frames.c.ts_utc >= since)
+    if until is not None:
+        q = q.where(frames.c.ts_utc <= until)
+    return q
+
+
+def _group_expr(group: str):
+    """Dialect-portable extraction of a JSON field, for bucket sub-keying."""
+    if engine.dialect.name == "postgresql":
+        return func.jsonb_extract_path_text(frames.c.fields, group)
+    return func.json_extract(frames.c.fields, "$." + group)
+
+
+def time_bounds(session_uuid: str | list[str] | None, msg_type: str | None,
+                since: float | None = None, until: float | None = None):
+    """(min_ts, max_ts) for the filtered set, or (None, None) if empty.
+
+    Lets a downsampled query derive its own window when the caller didn't supply
+    one — without a window there is no bucket size, and the query would otherwise
+    fall back to returning the OLDEST `limit` rows.
+    """
+    q = _apply_filters(select(func.min(frames.c.ts_utc), func.max(frames.c.ts_utc)),
+                       session_uuid, msg_type, since, until)
+    with engine.begin() as conn:
+        row = conn.execute(q).first()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def history_downsampled(session_uuid: str | list[str] | None, msg_type: str | None,
+                        since: float | None, until: float | None,
+                        bucket: float, agg: str = "last",
+                        group: str | None = None) -> list[dict]:
+    """Time-bucketed history for one message type.
+
+    agg="last" (the default) buckets IN SQL: a window function keeps the newest
+    row per bucket, so the database returns ~one row per bucket spanning the whole
+    window. This is what makes long, high-rate channels correct — the old
+    "scan N raw rows then fold in Python" approach silently truncated a window to
+    its OLDEST HISTORY_SCAN_CAP rows, so a busy channel's chart stopped partway
+    through the session while a slow one (GPS) covered it all.
+
+    agg="avg" still folds in Python (averaging arbitrary JSON fields isn't
+    portable in SQL) and therefore remains subject to HISTORY_SCAN_CAP.
+
+    group: a field name to sub-key buckets by (e.g. "mppt_index"), so a single
+    msg_type that carries several interleaved sources keeps one representative
+    row per (bucket, group) instead of collapsing to whichever arrived last.
+    """
+    if bucket <= 0:
+        return history(session_uuid, msg_type, since, until, settings.HISTORY_SCAN_CAP)
+
+    if agg != "avg":
+        # ---- SQL-side bucketing: last row per (bucket[, group]) ----
+        partition = [func.floor(frames.c.ts_utc / bucket)]
+        if group:
+            partition.append(_group_expr(group))
+        rn = func.row_number().over(
+            partition_by=partition, order_by=frames.c.ts_utc.desc()
+        ).label("rn")
+        inner = _apply_filters(
+            select(frames.c.ts_utc, frames.c.fields, rn), session_uuid, msg_type, since, until
+        ).subquery()
+        q = (select(inner.c.ts_utc, inner.c.fields)
+             .where(inner.c.rn == 1)
+             .order_by(inner.c.ts_utc.asc())
+             .limit(settings.HISTORY_SCAN_CAP))
+        with engine.begin() as conn:
+            rows = conn.execute(q).mappings().all()
+        return [{"ts_utc": r["ts_utc"], "fields": r["fields"]} for r in rows]
+
+    # ---- agg="avg": fold in Python (capped scan) ----
+    q2 = _apply_filters(select(frames.c.ts_utc, frames.c.fields),
+                        session_uuid, msg_type, since, until)
+    q2 = q2.order_by(frames.c.ts_utc.asc()).limit(settings.HISTORY_SCAN_CAP)
+
+    with engine.begin() as conn:
+        rows = conn.execute(q2).mappings().all()
+
+    buckets: dict = {}                     # bucket key -> accumulator
+    for r in rows:
+        fields = r["fields"] or {}
+        bkey = math.floor(r["ts_utc"] / bucket)
+        key = (bkey, fields.get(group)) if group else bkey
+        acc = buckets.get(key)
+        if acc is None:
+            acc = {"ts_utc": r["ts_utc"], "last": fields, "sums": {}, "counts": {}}
+            buckets[key] = acc
+        acc["ts_utc"] = r["ts_utc"]
+        acc["last"] = fields
+        for k, v in fields.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                acc["sums"][k] = acc["sums"].get(k, 0.0) + v
+                acc["counts"][k] = acc["counts"].get(k, 0) + 1
+
+    out = []
+    for key in sorted(buckets, key=lambda k: (k[0], str(k[1])) if group else k):
+        acc = buckets[key]
+        merged = dict(acc["last"])
+        for k, total in acc["sums"].items():
+            merged[k] = total / acc["counts"][k]
+        out.append({"ts_utc": acc["ts_utc"], "fields": merged})
+    return out
+
+
+def state_at(session_uuid: str | list[str] | None, t: float, lookback: float | None = None,
+             split_field: str | None = None) -> list[dict]:
+    """Dashboard state at an instant: the newest row per message type at-or-before
+    `t`, within a bounded lookback window.
+
+    Bucketing is done in SQL (same window-function pattern as
+    history_downsampled) so this returns a few dozen rows — one per channel —
+    rather than dragging the whole lookback window into Python. A 120 s window on
+    a busy car can hold tens of thousands of frames, so that distinction matters
+    when the user is dragging a scrubber.
+
+    split_field sub-keys the partition by a JSON field (e.g. "mppt_index") so a
+    msg_type carrying several interleaved sources yields one row per source. It's
+    passed in by the caller — db.py stays agnostic to the CAN map.
+
+    A channel whose last frame predates the window simply doesn't appear, and the
+    dashboard renders it as N/A at `t`.
+    """
+    if lookback is None:
+        lookback = settings.REPLAY_LOOKBACK_S
+
+    partition = [frames.c.msg_type]
+    if split_field:
+        partition.append(_group_expr(split_field))
+    rn = func.row_number().over(
+        partition_by=partition, order_by=frames.c.ts_utc.desc()
+    ).label("rn")
+
+    inner = _apply_filters(
+        select(frames.c.msg_type, frames.c.ts_utc, frames.c.fields, rn),
+        session_uuid, None, t - lookback, t,
+    ).where(frames.c.msg_type.isnot(None)).subquery()
+
+    q = select(inner.c.msg_type, inner.c.ts_utc, inner.c.fields).where(inner.c.rn == 1)
+    with engine.begin() as conn:
+        rows = conn.execute(q).mappings().all()
+    return [{"msg_type": r["msg_type"], "ts_utc": r["ts_utc"], "fields": r["fields"]} for r in rows]
+
+
+def is_valid_gps(fields: dict | None) -> bool:
+    """True if a GPS fix looks real (enough satellites, sane, not null-island).
+
+    No-fix readings report 0 satellites and garbage coordinates (0,0 or wild
+    values), which otherwise draw wild lines across the map.
+    """
+    if not fields:
+        return False
+    lat, lon = fields.get("latitude"), fields.get("longitude")
+    sats = fields.get("num_satellites")
+    if lat is None or lon is None:
+        return False
+    if sats is None or sats < settings.GPS_MIN_SATS:
+        return False
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return False
+    if abs(lat) < 1.0 and abs(lon) < 3.0:      # null-island / still acquiring
+        return False
+    return True
+
+
+def track(session_uuid: str | list[str] | None, limit: int = 20000) -> list[dict]:
+    """Valid GPS points for the map polyline: [{ts_utc, lat, lon, speed}]."""
     rows = history(session_uuid, settings.GPS_MSG_TYPE, None, None, limit)
     points = []
     for r in rows:
         f = r["fields"] or {}
-        lat, lon = f.get("latitude"), f.get("longitude")
-        if lat is None or lon is None:
+        if not is_valid_gps(f):
             continue
         points.append({
             "ts_utc": r["ts_utc"],
-            "lat": lat,
-            "lon": lon,
+            "lat": f["latitude"],
+            "lon": f["longitude"],
             "speed": f.get("speed"),
         })
     return points

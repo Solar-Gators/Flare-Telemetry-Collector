@@ -33,6 +33,10 @@ services:
         condition: service_healthy
     expose:
       - "8000"
+    volumes:
+      # Serve the dashboard files from disk so frontend tweaks only need the file
+      # updated + a browser refresh (no image rebuild). Baked-in copy is the fallback.
+      - ./static:/app/server/static:ro
 
   caddy:
     image: caddy:2

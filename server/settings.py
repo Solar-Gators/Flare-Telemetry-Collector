@@ -32,3 +32,20 @@ SESSION_TTL = int(os.environ.get("FLARE_SESSION_TTL", str(7 * 24 * 3600)))  # se
 
 # The message type carrying GPS fix (catalog name of the collector's GpsData).
 GPS_MSG_TYPE = "GpsPacket"
+# Minimum satellites for a GPS fix to be trusted (no-fix readings report 0 and
+# garbage coordinates). Points below this, or near null-island, are excluded.
+GPS_MIN_SATS = int(os.environ.get("FLARE_GPS_MIN_SATS", "4"))
+
+# History/replay tuning. The frames table is one big generic store, so history
+# is decimated in Python: a downsampled query scans at most HISTORY_SCAN_CAP raw
+# rows (bounds memory on small hosts) and folds them into time buckets. Replay
+# ("state at time T") only scans the REPLAY_LOOKBACK_S window before T.
+# Each collector launch starts a new session_uuid, so one afternoon of testing
+# becomes many short sessions. For display they are grouped into logical "runs":
+# consecutive sessions separated by less than this gap belong to the same run.
+# Purely a read-time view — nothing in the database is merged or rewritten.
+RUN_GAP_S = float(os.environ.get("FLARE_RUN_GAP_S", "1800"))   # 30 minutes
+
+HISTORY_SCAN_CAP = int(os.environ.get("FLARE_HISTORY_SCAN_CAP", "200000"))
+HISTORY_DEFAULT_MAX_POINTS = int(os.environ.get("FLARE_HISTORY_MAX_POINTS", "2000"))
+REPLAY_LOOKBACK_S = float(os.environ.get("FLARE_REPLAY_LOOKBACK_S", "120"))

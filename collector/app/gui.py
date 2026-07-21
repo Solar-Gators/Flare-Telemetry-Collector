@@ -34,6 +34,20 @@ def decode_bms_faults(code: int) -> str:
     active = [name for mask, name in BMS_FAULTS.items() if code & mask]
     return " | ".join(active) if active else f"UNKNOWN (0x{code:04X})"
 
+
+def fmt_duration(sec: float) -> str:
+    """Elapsed seconds -> "45s" / "5m 03s" / "1h 05m 11s".
+
+    Keeps long gaps readable instead of printing one huge seconds count.
+    """
+    s = max(0, int(sec))
+    h, m, r = s // 3600, (s % 3600) // 60, s % 60
+    if h:
+        return f"{h}h {m:02d}m {r:02d}s"
+    if m:
+        return f"{m}m {r:02d}s"
+    return f"{r}s"
+
 # ---------------------------------------------------------------------------
 # Colors  — brighter label text so grey is actually readable on dark bg
 # ---------------------------------------------------------------------------
@@ -1237,13 +1251,13 @@ class TelemetryWindow(QWidget):
                     text  = "live"
                     color = C_OK
                 elif age < 5.0:
-                    text  = f"{age:.1f} s ago"
+                    text  = f"{age:.1f}s ago"
                     color = C_OK
                 elif age < 30.0:
-                    text  = f"{age:.1f} s ago"
+                    text  = f"{age:.1f}s ago"
                     color = C_STALE    # getting old — orange warning
                 else:
-                    text  = f"{age:.0f} s ago"
+                    text  = f"{fmt_duration(age)} ago"   # 1h 05m 11s ago
                     color = C_FAULT    # stale — red
 
             lbl.setText(

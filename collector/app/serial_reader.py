@@ -1,5 +1,6 @@
 # serial_reader.py
 
+import os
 import threading
 import time
 
@@ -8,7 +9,8 @@ from serial.tools import list_ports
 
 from app.radio_parser import RadioFrameParser
 
-DEFAULT_BAUD = 57600
+# Override without editing code: FLARE_SERIAL_BAUD=57600 python -m app.gui
+DEFAULT_BAUD = int(os.environ.get("FLARE_SERIAL_BAUD", "115200"))
 
 
 def find_port(preferred: str | None = None) -> str | None:

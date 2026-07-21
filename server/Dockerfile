@@ -17,5 +17,11 @@ WORKDIR /app/server
 
 # Single worker on purpose: the live "latest" map + WebSocket hub are in-process
 # and must not be split across workers.
+#
+# --proxy-headers makes uvicorn trust Caddy's X-Forwarded-Proto, so request.url
+# .scheme is "https" for proxied requests and the session cookie is correctly
+# marked Secure. Only Caddy can reach this port (compose `expose:`, not
+# `ports:`), so trusting all forwarded IPs is safe here.
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]

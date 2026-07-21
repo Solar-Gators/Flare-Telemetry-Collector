@@ -27,7 +27,8 @@
         body: JSON.stringify({ password }),
       });
       if (res.ok) {
-        window.location = '/';
+        // replace() so Back doesn't return to the login screen
+        window.location.replace('/');
       } else {
         err.hidden = false;
       }

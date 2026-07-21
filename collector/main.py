@@ -13,7 +13,7 @@ from app.uploader import UploaderThread, make_backend
 
 
 PORT = "COM4"
-BAUD = 57600
+BAUD = 115200
 
 state = TelemetryState()
 store: TelemetryStore | None = None

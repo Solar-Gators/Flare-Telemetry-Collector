@@ -21,7 +21,7 @@ import urllib.request
 from urllib.parse import urlparse
 
 from app import parsed_tables, upload_map
-from app.payload_parsers import parse_payload
+from app.payload_parsers import GpsData, parse_payload
 from app.storage import _configure_connection
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,22 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE      = 200
 _POLL_INTERVAL   = 2.0     # seconds between drain attempts when caught up
 _BACKOFF_MAX     = 60.0    # cap for exponential backoff after failures
+
+# GPS fixes with too few satellites (or garbage coordinates) are inaccurate; they
+# are dropped from upload — never stored online or plotted. Override the minimum
+# with FLARE_GPS_MIN_SATS (must match the server's for consistency).
+GPS_MIN_SATS = int(os.environ.get("FLARE_GPS_MIN_SATS", "4"))
+
+
+def _gps_accurate(g: GpsData) -> bool:
+    """True if a GPS fix has enough satellites and sane, non-null-island coords."""
+    if g.satellites < GPS_MIN_SATS:
+        return False
+    if not (-90 <= g.latitude <= 90 and -180 <= g.longitude <= 180):
+        return False
+    if abs(g.latitude) < 1.0 and abs(g.longitude) < 3.0:   # null-island / acquiring
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +156,9 @@ def make_backend() -> TelemetryBackend | None:
                          "is unset; uploads disabled")
             return None
         token = os.environ.get("FLARE_UPLOAD_TOKEN") or None
+        timeout = float(os.environ.get("FLARE_UPLOAD_TIMEOUT", "10"))
         logger.info("uploader: REST backend -> %s", url)
-        return RestApiBackend(url, token)
+        return RestApiBackend(url, token, timeout=timeout)
     logger.warning("uploader: unknown FLARE_UPLOAD_BACKEND=%r, uploads disabled", name)
     return None
 
@@ -220,21 +237,31 @@ class UploaderThread:
             logger.info("uploader: stopped")
 
     def _drain_once(self, conn: sqlite3.Connection) -> int:
-        """Upload one batch of un-synced frames. Returns rows sent."""
+        """Upload one batch of un-synced frames. Returns rows sent.
+
+        Drains NEWEST-first (id DESC): live frames always upload immediately, and
+        any historical backlog fills in behind them instead of delaying live data.
+        The server dedupes on the stable id, so upload order doesn't affect
+        correctness. (A dropped connection still can't lose data — unsent rows
+        stay synced=0 and are retried.)
+        """
         rows = conn.execute(
             "SELECT f.id, s.session_uuid, f.ts_utc, f.ts_mono, f.can_id, f.payload "
             "FROM frames f "
             "JOIN sessions s ON s.id = f.session_id "
             "WHERE f.synced = 0 "
-            "ORDER BY f.id LIMIT ?",
+            "ORDER BY f.id DESC LIMIT ?",
             (self._batch_size,),
         ).fetchall()
 
         if not rows:
             return 0
 
-        batch = [self._to_record(r) for r in rows]
-        self._backend.upload(batch)          # raises on failure -> rows stay unsynced
+        # Inaccurate GPS fixes are dropped (record is None) but still marked synced
+        # below so they don't retry forever.
+        batch = [rec for rec in (self._to_record(r) for r in rows) if rec is not None]
+        if batch:
+            self._backend.upload(batch)      # raises on failure -> rows stay unsynced
 
         ids = [r[0] for r in rows]
         marks = ",".join("?" * len(ids))
@@ -248,16 +275,21 @@ class UploaderThread:
         return len(ids)
 
     @staticmethod
-    def _to_record(row) -> dict:
+    def _to_record(row) -> dict | None:
         """Build the JSON record for one frame, decoded into catalog names.
 
-        The raw payload is always included (lossless, re-decodable). When the CAN
-        id decodes to a known message, `msg_type` and `fields` carry the catalog's
-        message + field names (via app.upload_map), so the server and web frontend
-        render straight from shared/can_messages.toml with no mapping of their own.
+        Returns None to drop the frame from upload — used for inaccurate GPS fixes
+        (too few satellites / garbage coordinates), which we don't store online or
+        plot. The raw payload of everything else is always included (lossless,
+        re-decodable). When the CAN id decodes to a known message, `msg_type` and
+        `fields` carry the catalog's names (via app.upload_map), so the server and
+        web frontend render straight from shared/can_messages.toml.
         """
         fid, suid, ts_utc, ts_mono, can_id, payload = row
         payload = bytes(payload)
+        parsed = parse_payload(can_id, payload)
+        if isinstance(parsed, GpsData) and not _gps_accurate(parsed):
+            return None
         rec = {
             # Stable, idempotent id so re-uploads dedupe server-side.
             "id":           f"{suid}:{fid}",
@@ -269,7 +301,6 @@ class UploaderThread:
             "msg_type":     None,
             "fields":       None,
         }
-        parsed = parse_payload(can_id, payload)
         if parsed is not None:
             mapped = upload_map.to_upload(parsed)
             if mapped is not None:
