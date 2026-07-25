@@ -1,0 +1,11 @@
+# Caddy reverse proxy with automatic HTTPS.
+# {$DOMAIN} is read from the environment (server/.env).
+#
+# - A real domain (telemetry.solargators.org) -> Caddy fetches a Let's Encrypt cert.
+# - No domain yet? Set DOMAIN=:80 in .env to serve plain HTTP on the droplet IP
+#   (fine for a first test; the login cookie is not marked Secure over HTTP).
+
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy web:8000
+}

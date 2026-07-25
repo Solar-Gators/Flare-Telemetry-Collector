@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flare Telemetry</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>🐊 FLARE TELEMETRY</h1>
+    <span id="live" class="live-pill"><span class="dot"></span><span id="live-text">connecting…</span></span>
+    <div class="spacer"></div>
+    <nav class="viewnav">
+      <button type="button" data-view="live" class="active">Live</button>
+      <button type="button" data-view="history">History</button>
+    </nav>
+    <button id="logout" class="ghost" type="button">Sign out</button>
+  </header>
+
+  <main>
+    <!-- LIVE: grouped subsystem cards (like the desktop GUI). The map card's
+         #map div is created inside this grid by cards.js and never re-rendered. -->
+    <section id="view-live">
+      <div id="cards" class="subsystem-grid"></div>
+    </section>
+
+    <!-- HISTORY: pick a session + range; review decimated charts + GPS track. -->
+    <section id="view-history" hidden>
+      <div class="range-controls">
+        <label class="ctl">Session
+          <select id="hist-session"></select>
+        </label>
+        <div class="range-presets">
+          <button type="button" data-range="full" class="active">Full</button>
+          <button type="button" data-range="300">Last 5 min</button>
+          <button type="button" data-range="60">Last 1 min</button>
+        </div>
+        <button id="reset-zoom" class="ghost" type="button" hidden>Reset zoom</button>
+        <span id="downsample-badge" class="downsample-badge muted"></span>
+        <div class="export-group">
+          <button id="export-run" class="ghost" type="button">⬇ CSV — this run</button>
+          <button id="export-all" class="ghost" type="button">⬇ CSV — everything</button>
+        </div>
+      </div>
+      <div id="history-map" class="history-map"></div>
+
+      <!-- Replay: scrub to any instant; the cards below reconstruct the whole
+           dashboard at that moment, the map marker moves, charts show a cursor. -->
+      <div class="replay-bar">
+        <span class="replay-label">Replay</span>
+        <input type="range" id="scrubber" min="0" max="1000" value="1000" step="1" />
+        <span id="replay-time" class="replay-time">—</span>
+      </div>
+      <div id="replay-cards" class="subsystem-grid replay-grid"></div>
+
+      <div class="charts" id="history-charts"><div class="section-title">Trends</div></div>
+    </section>
+  </main>
+
+  <!-- Expanded chart "window". The clicked .chart-card is moved in here (same
+       Chart instance, so data + zoom carry over) and moved back on close. -->
+  <div id="chart-modal" class="modal" hidden>
+    <div class="modal-window">
+      <button type="button" class="modal-close" aria-label="Close">&times;</button>
+      <div class="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+  <script src="/static/schema.js"></script>
+  <script src="/static/cards.js"></script>
+  <script src="/static/live.js"></script>
+  <script src="/static/history.js"></script>
+  <script src="/static/main.js"></script>
+</body>
+</html>
