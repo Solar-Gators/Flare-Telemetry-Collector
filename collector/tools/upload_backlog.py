@@ -71,12 +71,22 @@ def main() -> int:
 
     def send(sub):
         # sub: list of row tuples -> POST; returns the ids on success, raises on failure.
-        recs = [UploaderThread._to_record(r) for r in sub]
-        backend.upload(recs)
+        #
+        # _to_record returns None for frames we deliberately don't upload
+        # (inaccurate GPS fixes). Those MUST be filtered out, exactly as
+        # UploaderThread._drain_once does: a None in the batch makes the server's
+        # store_batch raise, the POST 500s, and this same batch then retries
+        # forever — one early low-satellite fix would stall the whole backfill at
+        # 0%. The rows are still marked synced below, so they don't come back.
+        recs = [rec for rec in (UploaderThread._to_record(r) for r in sub)
+                if rec is not None]
+        if recs:
+            backend.upload(recs)
         return [r[0] for r in sub]
 
     done = 0
     fails = 0
+    dead_rounds = 0          # consecutive rounds that uploaded nothing at all
     start = time.monotonic()
     pool = cf.ThreadPoolExecutor(max_workers=WORKERS)
     try:
@@ -101,9 +111,23 @@ def main() -> int:
             print(f"\r  {done:,}/{total_left:,}  ({100*done/total_left:5.1f}%)  "
                   f"{rate:6.0f}/s  eta {eta/60:4.1f} min  fails {fails}      ",
                   end="", flush=True)
+            if ok_ids:
+                dead_rounds = 0
             if round_fail:
                 fails += round_fail
-                time.sleep(min(2 ** min(round_fail, 5), 30))   # server pushback
+                if not ok_ids:
+                    # Nothing got through: almost always no connectivity rather
+                    # than server pushback. Keep retrying — the backlog is the
+                    # whole point — but say so, and back off across rounds, not
+                    # just within one, so a long outage isn't a hot loop.
+                    dead_rounds += 1
+                    wait = min(2 ** min(dead_rounds, 5), 30)
+                    print(f"\n  offline or server unreachable (round {dead_rounds}) "
+                          f"— retrying in {wait:.0f}s; nothing lost, re-runnable",
+                          flush=True)
+                    time.sleep(wait)
+                else:
+                    time.sleep(min(2 ** min(round_fail, 5), 30))   # server pushback
             elif not ok_ids:
                 time.sleep(2)
     except KeyboardInterrupt:

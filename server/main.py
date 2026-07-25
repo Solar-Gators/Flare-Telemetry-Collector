@@ -59,7 +59,18 @@ class Hub:
         self._clients: set[WebSocket] = set()
         self._lock = asyncio.Lock()
 
-    def apply(self, event: dict) -> dict:
+    def apply(self, event: dict) -> dict | None:
+        """Fold one event into the latest-value map.
+
+        Returns the item if it ADVANCED its channel, or None if it was stale.
+
+        Uploads arrive in send order, not time order: the collector drains
+        newest-first and a reconnecting car replays a backlog behind live
+        frames, so an event that is minutes old routinely lands after a current
+        one. The live dashboard must track the newest TIMESTAMP, not the newest
+        arrival — so a stale event updates nothing and is not broadcast, which
+        also keeps old GPS fixes from yanking the map marker backwards.
+        """
         ch = channel_for(event["msg_type"], event.get("fields"))
         item = {
             "channel": ch,
@@ -67,10 +78,10 @@ class Hub:
             "ts_utc": event["ts_utc"],
             "fields": event.get("fields") or {},
         }
-        # Keep only the newest sample per channel.
         prev = self.latest.get(ch)
-        if prev is None or item["ts_utc"] >= prev["ts_utc"]:
-            self.latest[ch] = item
+        if prev is not None and item["ts_utc"] < prev["ts_utc"]:
+            return None
+        self.latest[ch] = item
         return item
 
     async def register(self, ws: WebSocket):
@@ -161,15 +172,26 @@ async def ingest(request: Request, _=Depends(require_ingest)):
     for ev in result["events"]:
         if ev["msg_type"] == settings.GPS_MSG_TYPE and not db.is_valid_gps(ev.get("fields")):
             continue
-        live.append(hub.apply(ev))
+        item = hub.apply(ev)
+        if item is None:
+            # Older than what this channel already holds — a backlog frame
+            # arriving behind live data. It is already stored; it just must not
+            # touch the live view.
+            continue
+        live.append(item)
         # Pack voltage and current arrive as separate messages; the estimator
         # steps once both are present and mutually fresh. Only the last result
         # of the batch is published — intermediate steps are the same channel.
+        #
+        # Fed only from advancing events, so replaying an old session's backlog
+        # can't reset the live coulomb counter to a stale anchor mid-run.
         soc = live_soc.observe(ev) or soc
 
     if soc is not None:
-        live.append(hub.apply({"msg_type": derived.CHANNEL,
-                               "ts_utc": live_soc.est.last_ts, "fields": soc}))
+        soc_item = hub.apply({"msg_type": derived.CHANNEL,
+                              "ts_utc": live_soc.est.last_ts, "fields": soc})
+        if soc_item is not None:
+            live.append(soc_item)
     if live:
         await hub.broadcast({"type": "telemetry", "events": live})
     return {"ingested": result["count"]}

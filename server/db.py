@@ -87,6 +87,12 @@ def store_batch(records: list[dict]) -> dict:
     events: list[dict] = []
 
     for r in records:
+        # Skip anything that isn't a record-shaped dict. One malformed entry used
+        # to raise here and 500 the whole POST, which the collector then retries
+        # forever — a single bad record could stall an entire backlog upload at
+        # zero progress. Dropping it costs one frame; raising costs all of them.
+        if not isinstance(r, dict):
+            continue
         uid = r.get("id")
         ts = r.get("ts_utc")
         if not uid or ts is None:

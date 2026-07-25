@@ -9,6 +9,7 @@
 # one backend class and a branch in `make_backend()` — nothing else changes.
 
 import abc
+import contextlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE      = 200
 _POLL_INTERVAL   = 2.0     # seconds between drain attempts when caught up
 _BACKOFF_MAX     = 60.0    # cap for exponential backoff after failures
+_DB_RETRY_S      = 10.0    # wait before retrying a failed database open
 
 # GPS fixes with too few satellites (or garbage coordinates) are inaccurate; they
 # are dropped from upload — never stored online or plotted. Override the minimum
@@ -127,11 +129,17 @@ class RestApiBackend(TelemetryBackend):
 
 
 def tcp_reachable(host: str, port: int, timeout: float = 3.0) -> bool:
-    """Best-effort connectivity probe for real network backends."""
+    """Best-effort connectivity probe for real network backends.
+
+    Catches Exception, not just OSError: a probe is a hint, never a reason to
+    fail. Name resolution in particular can raise beyond the socket errors —
+    UnicodeError from IDNA encoding, for one — and an uncaught raise here used
+    to kill the uploader thread outright (see UploaderThread._run).
+    """
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except OSError:
+    except Exception:
         return False
 
 
@@ -183,6 +191,27 @@ class UploaderThread:
         self._poll_interval = poll_interval
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Link state, for logging and for the GUI's upload indicator. Starts
+        # "offline" so the first pass probes before spending a batch on a link
+        # that may not exist — the chase car often boots with no signal.
+        self._online = False
+        self._last_success: float | None = None   # time.time() of last synced batch
+        self._failures = 0                        # consecutive failed attempts
+        self._sent_total = 0
+        self._last_error: str | None = None
+        self._lock = threading.Lock()
+
+    def status(self) -> dict:
+        """Snapshot of link state for the UI. Safe to call from any thread."""
+        with self._lock:
+            return {
+                "online": self._online,
+                "last_success": self._last_success,
+                "failures": self._failures,
+                "sent_total": self._sent_total,
+                "last_error": self._last_error,
+                "alive": self._thread is not None and self._thread.is_alive(),
+            }
 
     def start(self):
         self._thread = threading.Thread(
@@ -194,47 +223,101 @@ class UploaderThread:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
-        self._backend.close()
+        # Shutdown must not raise: this runs while the GUI is closing, and a
+        # backend that fails to close cleanly should not take the app down with
+        # it. Anything unsent is already durable in SQLite.
+        with contextlib.suppress(Exception):
+            self._backend.close()
 
     # ------------------------------------------------------------------ loop
 
     def _run(self):
-        try:
-            conn = sqlite3.connect(self._store.db_path)
-            _configure_connection(conn)
-        except sqlite3.Error as err:
-            logger.error("uploader disabled: could not open %s: %s",
-                         self._store.db_path, err)
-            return
+        """Drain loop. Runs until stop() and MUST NOT die for any other reason.
 
+        Losing connectivity is the normal case, not an error: the car spends
+        whole runs out of coverage and the backlog is expected to sit locally
+        until a link returns. So every step — the reachability probe, the
+        database open, the drain — is inside the try, and the only exit is
+        self._stop. An uncaught exception here previously killed the thread and
+        stranded the backlog until the app was restarted, which is precisely the
+        failure this loop exists to prevent.
+        """
         logger.info("uploader: started (%s)", type(self._backend).__name__)
+        conn: sqlite3.Connection | None = None
         backoff = self._poll_interval
         try:
             while not self._stop.is_set():
-                if not self._backend.is_reachable():
-                    self._wait(backoff)
-                    backoff = min(backoff * 2, _BACKOFF_MAX)
-                    continue
-
                 try:
+                    if conn is None:
+                        # Retried rather than fatal: the DB may be briefly locked
+                        # by the writer thread at startup.
+                        conn = sqlite3.connect(self._store.db_path)
+                        _configure_connection(conn)
+
+                    # Probe only while we believe we're offline. Once the link is
+                    # up, skipping it saves a TCP round-trip per batch, which
+                    # roughly halves the time to clear a large backlog; a failed
+                    # upload flips us back to offline and the probe resumes.
+                    if not self._online and not self._backend.is_reachable():
+                        raise ConnectionError("backend not reachable")
+
                     sent = self._drain_once(conn)
-                except Exception as err:      # backend/network failure
-                    logger.warning("uploader: batch failed (%s), backing off %.0fs",
-                                   err, backoff)
+                except Exception as err:
+                    self._note_failure(err, backoff)
+                    if conn is not None and isinstance(err, sqlite3.Error):
+                        with contextlib.suppress(Exception):
+                            conn.close()
+                        conn = None
+                        backoff = max(backoff, _DB_RETRY_S)
                     self._wait(backoff)
                     backoff = min(backoff * 2, _BACKOFF_MAX)
                     continue
 
+                self._note_success(sent)
                 backoff = self._poll_interval          # success resets backoff
                 if sent < self._batch_size:
                     # Caught up — idle until more rows accumulate.
                     self._wait(self._poll_interval)
         finally:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
-            logger.info("uploader: stopped")
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+            logger.info("uploader: stopped (%d frames sent this run)", self._sent_total)
+
+    # ------------------------------------------------------------ link state
+
+    def _note_failure(self, err: Exception, backoff: float):
+        """Record a failed attempt. Logs the transition loudly, then quietly.
+
+        A multi-hour outage would otherwise fill the log with one identical
+        warning per retry, burying anything else the operator needs to see.
+        """
+        with self._lock:
+            was_online = self._online
+            self._online = False
+            self._failures += 1
+            self._last_error = f"{type(err).__name__}: {err}"
+            failures = self._failures
+        if was_online or failures == 1:
+            logger.warning("uploader: upload failed (%s) — backlog is safe locally, "
+                           "retrying (next in %.1fs, backing off to %.0fs) until the "
+                           "link returns", err, backoff, _BACKOFF_MAX)
+        else:
+            logger.debug("uploader: still offline after %d attempts (%s)", failures, err)
+
+    def _note_success(self, sent: int):
+        with self._lock:
+            was_offline = not self._online
+            failures = self._failures
+            self._online = True
+            self._failures = 0
+            self._last_error = None
+            if sent:
+                self._last_success = time.time()
+                self._sent_total += sent
+        if was_offline and failures:
+            logger.info("uploader: link restored after %d failed attempts — "
+                        "draining backlog", failures)
 
     def _drain_once(self, conn: sqlite3.Connection) -> int:
         """Upload one batch of un-synced frames. Returns rows sent.

@@ -118,11 +118,19 @@ function applyEvent(ev) {
   if (ev.msg_type === "GpsPacket" && !validGps(ev.fields)) return;   // drop bad fixes
   const ch = ev.channel || channelFor(ev.msg_type, ev.fields);
   const prev = latest[ch];
-  if (!prev || ev.ts_utc >= prev.ts_utc) latest[ch] = { ...ev, channel: ch };
+  // Newest by TIMESTAMP, never by arrival order — see Hub.apply in main.py. The
+  // server already filters stale events, but events can still be reordered
+  // within a batch, and this guard is what the map depends on.
+  const advances = !prev || ev.ts_utc >= prev.ts_utc;
+  if (advances) latest[ch] = { ...ev, channel: ch };
   if (mode !== "live") return;                 // map frozen while viewing history
   // Cards re-render on a timer (see boot) so staleness is re-evaluated even when
   // a channel simply stops arriving; here we only drive the live map.
-  if (ev.msg_type === "GpsPacket" && liveMap) liveMap.pushGps(ev.fields || {});
+  //
+  // `advances` matters most here: pushGps APPENDS to the trail and moves the
+  // marker, so replaying an old fix used to jump the car backwards and stitch a
+  // spurious leg across the map while a backlog uploaded.
+  if (advances && ev.msg_type === "GpsPacket" && liveMap) liveMap.pushGps(ev.fields || {});
 }
 
 // --------------------------------------------------------------- live status pill
