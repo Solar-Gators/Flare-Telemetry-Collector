@@ -27,6 +27,13 @@ CATALOG_PATH = os.environ.get(
     "FLARE_CATALOG_PATH", os.path.join(_REPO_ROOT, "shared", "can_messages.toml")
 )
 
+# Battery model behind the state-of-charge estimate (derived.py / pack_model.py),
+# distilled from the Voltt pack simulation by shared/build_pack_model.py. Read as
+# data, like the catalog. Regenerate it if the pack chemistry or layout changes.
+PACK_MODEL_PATH = os.environ.get(
+    "FLARE_PACK_MODEL_PATH", os.path.join(_REPO_ROOT, "shared", "pack_model.json")
+)
+
 COOKIE_NAME = "flare_session"
 SESSION_TTL = int(os.environ.get("FLARE_SESSION_TTL", str(7 * 24 * 3600)))  # seconds
 

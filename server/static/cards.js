@@ -70,6 +70,18 @@ const CARDS = [
   { id: "speed", title: "Speed", accent: "cyan", big: true, bigUnit: "MPH",
     value: { ch: "GpsPacket", field: "speed", transform: "knotsToMph", fmt: 0, color: "blue" } },
 
+  // State of charge is INFERRED, not measured — the collector doesn't decode
+  // bms_pack_status, so the BMS's own soc never reaches us. server/derived.py
+  // fuses a coulomb count with an OCV lookup against the pack model; both the
+  // fused answer and the raw OCV estimate are shown, because their divergence
+  // is the health signal (a pack whose real capacity has aged below the
+  // modelled 38.078 Ah drifts the two apart).
+  { id: "soc", title: "State of Charge", accent: "green", big: true, bigUnit: "% CHARGE",
+    value: { ch: "derived.pack", field: "soc_pct", fmt: 1, color: "green" }, rows: [
+      { label: "OCV Estimate", ch: "derived.pack", field: "soc_ocv_pct", unit: "%", fmt: 1, color: "teal" },
+      { label: "Energy Left", ch: "derived.pack", field: "wh_remaining", unit: "Wh", fmt: 0, color: "green" },
+    ]},
+
   // MPPT Front / Middle / Back (indices 1,3,2)
   ...MPPT_ORDER.map((n) => ({
     id: `mppt${n}`, title: `MPPT ${MPPT_NAMES[n]}`, accent: "yellow", ch: `MpptPacket:${n}`, rows: [
@@ -171,7 +183,7 @@ function buildCard(card) {
   box.appendChild(el("h2", null, card.title.toUpperCase()));
 
   if (card.map) {                       // the Leaflet map lives here, never re-rendered
-    const m = el("div", "card-map");
+    const m = el("div", "card-mapbox");
     m.id = "map";
     box.appendChild(m);
     return { box, update: () => {} };   // managed by live.js/history.js, not the tick
@@ -183,6 +195,13 @@ function buildCard(card) {
 }
 
 function buildRowsCard(card, box) {
+  const updaters = appendRows(card, box);      // DOM built ONCE, at build time
+  return { box, update: (s, n, m) => updaters.forEach((u) => u(s, n, m)) };
+}
+
+// Build `card.rows` into `box` and return their updaters. Shared by the plain
+// rows card and by big-numeral cards that carry supporting rows underneath.
+function appendRows(card, box) {
   const updaters = [];
   for (const row of card.rows) {
     if (row.hr) { box.appendChild(el("hr", "card-hr")); continue; }
@@ -201,15 +220,18 @@ function buildRowsCard(card, box) {
     // The unit slot is always present (fixed width) so the number's right edge is
     // the same across every row in the card, regardless of unit width.
     const wrap = el("span", "row-valwrap");
-    const val = el("span", "row-value");
+    const val = el("span", "row-value v-na", "N/A");
     const unit = el("small", "row-unit", row.unit || "");
+    // Hidden until the first update, so a card that never receives one reads
+    // "N/A" rather than a bare unit with an empty value beside it.
+    unit.style.visibility = "hidden";
     wrap.appendChild(val);
     wrap.appendChild(unit);
     line.appendChild(wrap);
     box.appendChild(line);
     updaters.push((state, nowS, mode) => updateRow(val, unit, card, row, state, nowS, mode));
   }
-  return { box, update: (s, n, m) => updaters.forEach((u) => u(s, n, m)) };
+  return updaters;
 }
 
 function buildBigCard(card, box) {
@@ -217,11 +239,15 @@ function buildBigCard(card, box) {
   const unit = el("div", "card-big-unit", card.bigUnit);
   box.appendChild(big);
   box.appendChild(unit);
+  // A big card may also carry supporting rows (State of Charge shows the
+  // independent OCV estimate and remaining energy beneath the headline number).
+  const rowUpdaters = card.rows ? appendRows(card, box) : [];
   return { box, update: (state, nowS, mode) => {
     const v = computeValue(card.value, card, state, nowS, mode);
     big.textContent = v == null ? "N/A" : (FMT[card.value.fmt] || FMT[0])(v);
     big.classList.toggle("v-na", v == null);
     big.classList.toggle("dim", v != null && anyDim(state, govChannels(card, card.value), nowS, mode));
+    rowUpdaters.forEach((u) => u(state, nowS, mode));
   }};
 }
 

@@ -9,7 +9,11 @@
  */
 
 // -------------------------------------------------------------------- map factory
-function makeMap(containerId) {
+// follow:true keeps the view centred on the car as fixes arrive, with a toggle
+// control. Panning by hand switches follow off (the user asked to look
+// elsewhere); zooming does not, since zooming in on the car is a normal thing to
+// want while following.
+function makeMap(containerId, { follow = false } = {}) {
   const map = L.map(containerId, { zoomControl: true }).setView([29.6436, -82.3549], 13);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19, attribution: "&copy; OpenStreetMap",
@@ -18,6 +22,39 @@ function makeMap(containerId) {
   const marker = L.circleMarker([29.6436, -82.3549], {
     radius: 7, color: "#fff", weight: 2, fillColor: "#3fb950", fillOpacity: 1,
   }).addTo(map);
+
+  // ------------------------------------------------------------ auto-follow
+  let following = follow;
+  let btn = null;
+
+  function setFollowing(on) {
+    following = on;
+    if (btn) btn.classList.toggle("on", on);
+  }
+  function centerOn(ll) {
+    // panTo degrades to an instant jump when the target is off-screen, so a
+    // reconnect after a long gap doesn't slide across the county.
+    if (following) map.panTo(ll, { animate: true, duration: 0.5 });
+  }
+  if (follow) {
+    map.on("dragstart", () => setFollowing(false));
+    const FollowCtl = L.Control.extend({
+      options: { position: "topright" },
+      onAdd() {
+        btn = L.DomUtil.create("button", "map-follow" + (following ? " on" : ""));
+        btn.type = "button";
+        btn.textContent = "◎ Follow";
+        btn.title = "Keep the map centred on the car";
+        L.DomEvent.disableClickPropagation(btn);
+        L.DomEvent.on(btn, "click", () => {
+          setFollowing(!following);
+          centerOn(marker.getLatLng());   // re-centre immediately when switched on
+        });
+        return btn;
+      },
+    });
+    map.addControl(new FollowCtl());
+  }
 
   function setTrack(points, recenter) {
     // /api/track is already filtered server-side; this is a geo guard for
@@ -29,8 +66,12 @@ function makeMap(containerId) {
       .map((p) => [p.lat, p.lon]);
     path.setLatLngs(latlngs);
     if (latlngs.length) {
-      marker.setLatLng(latlngs[latlngs.length - 1]);
-      if (recenter) map.fitBounds(path.getBounds(), { padding: [30, 30], maxZoom: 16 });
+      const last = latlngs[latlngs.length - 1];
+      marker.setLatLng(last);
+      // Following means "show me where the car is now", so seed on the car
+      // rather than zooming out to the whole track.
+      if (following) map.setView(last, Math.max(map.getZoom(), 16));
+      else if (recenter) map.fitBounds(path.getBounds(), { padding: [30, 30], maxZoom: 16 });
     }
   }
   function pushGps(fields) {
@@ -38,10 +79,11 @@ function makeMap(containerId) {
     const ll = [fields.latitude, fields.longitude];
     path.addLatLng(ll);
     marker.setLatLng(ll);
+    centerOn(ll);
   }
   function setMarker(lat, lon) { if (lat != null && lon != null) marker.setLatLng([lat, lon]); }
 
-  return { map, marker, path, setTrack, pushGps, setMarker };
+  return { map, marker, path, setTrack, pushGps, setMarker, setFollowing };
 }
 
 // ----------------------------------------------------------------------- cards
@@ -49,7 +91,7 @@ let liveCards = null;                  // { update(state, nowS, mode) } from car
 let liveMap = null;
 
 function initLiveCards() { liveCards = buildCards($("#cards")); }
-function initLiveMap()   { liveMap = makeMap("map"); }
+function initLiveMap()   { liveMap = makeMap("map", { follow: true }); }
 
 function refreshLiveCards() {
   if (liveCards) liveCards.update(latest, Date.now() / 1000, "live");

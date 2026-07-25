@@ -491,8 +491,13 @@ async function fireReplay(t) {
     const q = new URLSearchParams({ sessions: runSessionsParam(), t: String(t) });
     const res = await fetch(`/api/replay?${q}`);
     if (res.ok) applyReplay(await res.json());
+    // A failed replay must still paint the cards — otherwise they sit in their
+    // freshly-built state and it reads as "the panel is broken" rather than
+    // "this request failed".
+    else { console.error("replay", res.status, await res.text().catch(() => "")); applyReplay({ t, channels: {} }); }
   } catch (e) {
     console.error("replay", e);
+    applyReplay({ t, channels: {} });
   } finally {
     HIST.replayPending = false;
     const queued = HIST.replayQueued;
@@ -515,6 +520,64 @@ function applyReplay(data) {
     HIST.map.setMarker(gps.fields.latitude, gps.fields.longitude);
   }
   renderCursors();
+}
+
+// --------------------------------------------------------------------- export
+// Two scopes: the selected run (all of its member sessions, whole span — not the
+// zoomed window) or the entire database. Both stream from the server as one wide
+// CSV; nothing is built in the browser, so a million-row dump is just a download.
+
+function exportLabel() {
+  const r = HIST.run;
+  if (!r) return "export";
+  const d = new Date(r.first_seen * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `run_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+async function exportCsv(scope, btn) {
+  const params = new URLSearchParams();
+  if (scope === "run") {
+    if (!HIST.run) { alert("No run selected."); return; }
+    params.set("sessions", runSessionsParam());
+    params.set("label", exportLabel());
+  } else {
+    params.set("label", "all");
+  }
+
+  btn.disabled = true;
+  const restore = btn.textContent;
+  btn.textContent = "sizing…";
+  try {
+    // Ask how big it is first — "everything" is a multi-hundred-MB download and
+    // silently starting one is hostile.
+    const res = await fetch(`/api/export_info?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const info = await res.json();
+    if (!info.rows) { alert("Nothing to export in this scope."); return; }
+    const what = scope === "run" ? "this run" : "the ENTIRE database";
+    const ok = confirm(
+      `Export ${what} as CSV?\n\n` +
+      `${info.rows.toLocaleString()} rows · ${info.columns} columns · ` +
+      `${info.msg_types.length} message types\n` +
+      `Roughly ${fmtBytes(info.rows * info.columns * 2.2)}.`
+    );
+    if (!ok) return;
+    // Same-origin navigation so the session cookie rides along and the browser
+    // owns the download (progress, resume, no memory ceiling).
+    window.location = `/api/export.csv?${params}`;
+  } catch (e) {
+    alert(`Export failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = restore;
+  }
+}
+
+function fmtBytes(n) {
+  if (n > 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n > 1e6) return `${Math.round(n / 1e6)} MB`;
+  return `${Math.max(1, Math.round(n / 1e3))} KB`;
 }
 
 // ------------------------------------------------------------------- lifecycle
@@ -545,6 +608,11 @@ function initHistory() {
   });
   const reset = $("#reset-zoom");
   if (reset) reset.addEventListener("click", resetZoom);
+
+  const runBtn = $("#export-run");
+  const allBtn = $("#export-all");
+  if (runBtn) runBtn.addEventListener("click", () => exportCsv("run", runBtn));
+  if (allBtn) allBtn.addEventListener("click", () => exportCsv("all", allBtn));
   HIST.inited = true;
 }
 

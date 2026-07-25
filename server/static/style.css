@@ -115,6 +115,9 @@ main { padding: 12px; }
 .range-presets button { background: transparent; color: var(--muted); border: 0; padding: 5px 11px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .range-presets button.active { background: var(--a-blue); color: #fff; }
 .downsample-badge { margin-left: auto; font-size: 12px; font-family: "Courier New", monospace; }
+.export-group { display: inline-flex; gap: 6px; }
+.export-group button { font-size: 12px; padding: 6px 10px; }
+.export-group button[disabled] { opacity: .5; cursor: default; }
 .history-map { height: 360px; width: 100%; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); margin-bottom: 12px; }
 
 /* replay scrubber */
@@ -146,10 +149,11 @@ main { padding: 12px; }
   gap: 12px;
   align-items: start;
 }
-/* Row 1: Main Battery | Motor | Speed */
-.card-main_batt { grid-column: span 4; }
-.card-motor     { grid-column: span 4; }
-.card-speed     { grid-column: span 4; }
+/* Row 1: Main Battery | Motor | Speed | State of Charge */
+.card-main_batt { grid-column: span 3; }
+.card-motor     { grid-column: span 3; }
+.card-speed     { grid-column: span 3; }
+.card-soc       { grid-column: span 3; }
 /* Row 2: MPPT Front | Middle | Back | Total Solar */
 .card-mppt1, .card-mppt3, .card-mppt2 { grid-column: span 3; }
 .card-solar     { grid-column: span 3; }
@@ -161,7 +165,8 @@ main { padding: 12px; }
 
 @media (max-width: 1200px) {
   .subsystem-grid { grid-template-columns: repeat(6, 1fr); }
-  .card-main_batt, .card-motor, .card-speed { grid-column: span 2; }
+  /* two-up: Main Battery | Motor, then Speed | State of Charge */
+  .card-main_batt, .card-motor, .card-speed, .card-soc { grid-column: span 3; }
   .card-mppt1, .card-mppt3, .card-mppt2, .card-solar { grid-column: span 3; }
   .card-map { grid-column: span 6; }
   .card-contactors { grid-column: span 2; }
@@ -222,8 +227,19 @@ main { padding: 12px; }
 }
 .card-big-unit { text-align: center; color: var(--muted); letter-spacing: 3px; font-size: 13px; }
 
-/* map inside a card */
-.card-map { height: 300px; width: 100%; border-radius: 4px; background: var(--panel-2); }
+/* map inside a card. NOT .card-map — that class is on the card <section> itself
+   (grid span), and sharing the name shrank the whole card to 300px, clipping the
+   bottom of the map against the card's overflow:hidden. */
+.card-mapbox { height: 300px; width: 100%; border-radius: 4px; background: var(--panel-2); }
+
+/* follow-the-car toggle (Leaflet control) */
+.map-follow {
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 9px; font-size: 12px; font-weight: 600; cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .4);
+}
+.map-follow.on { background: var(--a-blue); color: #fff; border-color: var(--a-blue); }
 
 /* fault badges */
 .row-faults { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }

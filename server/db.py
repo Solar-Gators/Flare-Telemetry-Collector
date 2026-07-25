@@ -107,6 +107,9 @@ def store_batch(records: list[dict]) -> dict:
             events.append({
                 "msg_type": r["msg_type"],
                 "ts_utc": ts,
+                # Carried so derived.py can tell one collector launch from the
+                # next: its coulomb counter is only valid within a session.
+                "session_uuid": suid,
                 "fields": r.get("fields") or {},
             })
 
@@ -334,6 +337,89 @@ def state_at(session_uuid: str | list[str] | None, t: float, lookback: float | N
     with engine.begin() as conn:
         rows = conn.execute(q).mappings().all()
     return [{"msg_type": r["msg_type"], "ts_utc": r["ts_utc"], "fields": r["fields"]} for r in rows]
+
+
+# ------------------------------------------------------------------------- export
+
+def count_frames(session_uuid: str | list[str] | None,
+                 since: float | None = None, until: float | None = None) -> int:
+    q = _apply_filters(select(func.count()).select_from(frames),
+                       session_uuid, None, since, until)
+    with engine.begin() as conn:
+        return int(conn.execute(q).scalar() or 0)
+
+
+def distinct_msg_types(session_uuid: str | list[str] | None,
+                       since: float | None = None,
+                       until: float | None = None) -> list[str]:
+    """Which message types the export scope actually contains.
+
+    Lets the CSV carry a column per field of those types only, instead of a
+    column for every message in the catalog (most of which the car never sends).
+    """
+    q = _apply_filters(select(frames.c.msg_type).distinct(),
+                       session_uuid, None, since, until)
+    q = q.where(frames.c.msg_type.isnot(None))
+    with engine.begin() as conn:
+        return sorted(r[0] for r in conn.execute(q))
+
+
+def sample_field_names(session_uuid: str | list[str] | None,
+                       since: float | None = None, until: float | None = None,
+                       per_type: int = 200) -> dict[str, list[str]]:
+    """{msg_type: field names it actually carries}, sampled from recent rows.
+
+    The CSV's columns come from the DATA, not from the catalog: the collector
+    uploads fields the catalog doesn't name (MpptPacket.mppt_index says which
+    controller a row came from — the catalog encodes that in the CAN id, so it
+    has no field for it). Deriving columns from the catalog alone would bury it
+    in the catch-all column and make MPPT rows unseparable in a spreadsheet.
+
+    One indexed LIMIT query per type (idx_frames_type_ts), so this stays cheap
+    even scoped to the whole table. Any field missed by the sample still lands in
+    the catch-all, so nothing is ever dropped.
+    """
+    out: dict[str, list[str]] = {}
+    with engine.begin() as conn:
+        for t in distinct_msg_types(session_uuid, since, until):
+            q = _apply_filters(select(frames.c.fields), session_uuid, t, since, until)
+            q = q.order_by(frames.c.ts_utc.desc()).limit(per_type)
+            names: list[str] = []
+            seen: set[str] = set()
+            for (f,) in conn.execute(q):
+                for k in (f or {}):
+                    if k not in seen:
+                        seen.add(k)
+                        names.append(k)
+            out[t] = names
+    return out
+
+
+def iter_frames(session_uuid: str | list[str] | None,
+                since: float | None = None, until: float | None = None,
+                chunk: int = 5000):
+    """Stream every frame in scope, for CSV export.
+
+    Uses a server-side cursor (stream_results) so exporting the whole table never
+    materialises a million rows in memory — the response is generated as the
+    rows arrive.
+
+    Ordering: by ts_utc when scoped to a session/run (a bounded sort), but by
+    (session_uuid, ts_utc) when unscoped, which rides idx_frames_session_ts and
+    avoids a disk sort of the entire table. An unscoped dump is therefore
+    grouped by session and time-ordered within each.
+    """
+    q = _apply_filters(
+        select(frames.c.ts_utc, frames.c.session_uuid, frames.c.msg_type,
+               frames.c.can_id, frames.c.fields),
+        session_uuid, None, since, until)
+    q = (q.order_by(frames.c.ts_utc.asc()) if _norm_sessions(session_uuid)
+         else q.order_by(frames.c.session_uuid.asc(), frames.c.ts_utc.asc()))
+
+    with engine.connect().execution_options(
+            stream_results=True, yield_per=chunk) as conn:
+        for r in conn.execute(q).mappings():
+            yield r
 
 
 def is_valid_gps(fields: dict | None) -> bool:
