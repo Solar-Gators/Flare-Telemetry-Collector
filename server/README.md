@@ -2,7 +2,7 @@
 
 A self-contained FastAPI app that ingests decoded telemetry from the collector,
 stores it (Postgres), pushes live updates to browser dashboards over a WebSocket,
-and serves history + a live map. It shares **no imports** with `collector/`; the
+and serves dedicated Live, Map, and History pages. It shares **no imports** with `collector/`; the
 only coupling is the JSON upload contract and the vendored catalog
 `shared/can_messages.toml` (read as data).
 
@@ -23,7 +23,7 @@ collector (laptop)  --HTTPS POST /api/ingest-->  Caddy --> FastAPI --> Postgres
 | `GET /api/history?session=&type=&since=&until=&limit=` | cookie | rows for charts |
 | `GET /api/track?session=` | cookie | GPS points for the map |
 | `WS /ws` | cookie | live event stream |
-| `GET /` | — | dashboard (or login page if not signed in) |
+| `GET /`, `/live`, `/map`, `/history` | — | dashboard shell (or login page if not signed in) |
 
 Auth is intentionally simple: one shared **team password** → an HMAC-signed cookie,
 and a separate **ingest token** for the collector. No user database.
@@ -95,6 +95,15 @@ whenever the link is up, so a dropped connection never loses data.
 
 ## Local development (no Docker, SQLite)
 
+The frontend routes are:
+
+- `/live` — prominent Speed, State of Charge, and Total Solar Array cards. The
+   remaining telemetry cards are hidden behind a detail toggle. The optional live
+   Chart.js panel is not created until enabled.
+- `/map` — the selected session's GPS track in a full-page Leaflet map.
+- `/history` — one Chart.js history graph with statistic selection, threshold
+   filtering, summary values, selected-value table, and CSV download.
+
 ```bash
 cd server
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -104,6 +113,11 @@ FLARE_INGEST_TOKEN=dev FLARE_VIEW_PASSWORD=dev SECRET_KEY=dev \
 ```
 Then POST a sample batch to `http://127.0.0.1:8000/api/ingest` with
 `Authorization: Bearer dev`, or run the collector's `rest` backend against it.
+
+The history page requests only the selected message type and uses the server's
+`max_points` downsampling. The live WebSocket remains connected for cards and
+status, but the live chart allocates no Chart.js instance or point buffer until
+the user enables it.
 
 ## Operations
 

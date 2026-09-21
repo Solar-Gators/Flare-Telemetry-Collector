@@ -516,6 +516,13 @@ def index(request: Request):
     return FileResponse(os.path.join(_STATIC, page), headers=_NO_STORE)
 
 
+@app.get("/live")
+@app.get("/map")
+@app.get("/history")
+def routed_index(request: Request):
+    return index(request)
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}

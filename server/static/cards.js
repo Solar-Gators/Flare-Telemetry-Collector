@@ -395,12 +395,17 @@ function applyAge(valEl, age) {
 // includeMap:false skips the GPS map card — the History replay panel reuses this
 // model but already has its own map (#history-map), and only one element may
 // own the id "map".
-function buildCards(container, { includeMap = true } = {}) {
+function buildCards(container, { includeMap = true, filter = null } = {}) {
   container.innerHTML = "";
-  const built = CARDS.filter((c) => includeMap || !c.map).map((c) => {
+  const built = CARDS.filter(
+    (c) => (includeMap || !c.map) && (!filter || filter(c)),
+  ).map((c) => {
     const b = buildCard(c);
     container.appendChild(b.box);
     return b;
   });
-  return { update: (state, nowS, mode) => built.forEach((b) => b.update(state, nowS, mode)) };
+  return {
+    update: (state, nowS, mode) =>
+      built.forEach((b) => b.update(state, nowS, mode)),
+  };
 }

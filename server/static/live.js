@@ -89,12 +89,80 @@ function makeMap(containerId, { follow = false } = {}) {
 // ----------------------------------------------------------------------- cards
 let liveCards = null;                  // { update(state, nowS, mode) } from cards.js
 let liveMap = null;
+let liveChart = null;
+let liveChartPoints = [];
+let liveChartSpec = {
+  type: "GpsPacket",
+  field: "speed",
+  label: "Speed",
+  unit: "knots",
+};
 
-function initLiveCards() { liveCards = buildCards($("#cards")); }
-function initLiveMap()   { liveMap = makeMap("map", { follow: true }); }
+const PRIMARY_CARD_IDS = new Set(["speed", "soc", "solar"]);
+
+function initLiveCards() {
+  liveCards = {
+    primary: buildCards($("#primary-cards"), {
+      includeMap: false,
+      filter: (c) => PRIMARY_CARD_IDS.has(c.id),
+    }),
+    detail: buildCards($("#detail-cards"), {
+      includeMap: false,
+      filter: (c) => !PRIMARY_CARD_IDS.has(c.id),
+    }),
+  };
+}
+function initLiveMap() {
+  liveMap = null;
+}
 
 function refreshLiveCards() {
-  if (liveCards) liveCards.update(latest, Date.now() / 1000, "live");
+  if (!liveCards) return;
+  const now = Date.now() / 1000;
+  liveCards.primary.update(latest, now, "live");
+  liveCards.detail.update(latest, now, "live");
+}
+
+function enableLiveChart() {
+  if (liveChart) return;
+  const canvas = $("#live-chart-canvas");
+  if (!canvas) return;
+  liveChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      datasets: [
+        {
+          label: liveChartSpec.label,
+          data: [],
+          borderColor: "#4fc3f7",
+          pointRadius: 0,
+        },
+      ],
+    },
+    options: {
+      animation: false,
+      parsing: false,
+      normalized: true,
+      scales: {
+        x: {
+          type: "linear",
+          ticks: { callback: (v) => new Date(v * 1000).toLocaleTimeString() },
+        },
+        y: { title: { display: true, text: liveChartSpec.unit } },
+      },
+    },
+  });
+  $("#live-chart-panel").hidden = false;
+}
+
+function appendLiveChart(ev) {
+  if (!liveChart || ev.msg_type !== liveChartSpec.type) return;
+  const value = ev.fields?.[liveChartSpec.field];
+  if (typeof value !== "number" || !Number.isFinite(value)) return;
+  liveChartPoints.push({ x: ev.ts_utc, y: value });
+  liveChartPoints = liveChartPoints.slice(-MAX_POINTS);
+  liveChart.data.datasets[0].data = liveChartPoints;
+  liveChart.update("none");
 }
 
 // ------------------------------------------------------------------ live wire
@@ -115,7 +183,7 @@ function connectWs() {
 }
 
 function applyEvent(ev) {
-  if (ev.msg_type === "GpsPacket" && !validGps(ev.fields)) return;   // drop bad fixes
+  if (ev.msg_type === "GpsPacket" && !validGps(ev.fields)) return; // drop bad fixes
   const ch = ev.channel || channelFor(ev.msg_type, ev.fields);
   const prev = latest[ch];
   // Newest by TIMESTAMP, never by arrival order — see Hub.apply in main.py. The
@@ -123,14 +191,16 @@ function applyEvent(ev) {
   // within a batch, and this guard is what the map depends on.
   const advances = !prev || ev.ts_utc >= prev.ts_utc;
   if (advances) latest[ch] = { ...ev, channel: ch };
-  if (mode !== "live") return;                 // map frozen while viewing history
+  if (advances) appendLiveChart(ev);
+  if (mode !== "live") return; // map frozen while viewing history
   // Cards re-render on a timer (see boot) so staleness is re-evaluated even when
   // a channel simply stops arriving; here we only drive the live map.
   //
   // `advances` matters most here: pushGps APPENDS to the trail and moves the
   // marker, so replaying an old fix used to jump the car backwards and stitch a
   // spurious leg across the map while a backlog uploaded.
-  if (advances && ev.msg_type === "GpsPacket" && liveMap) liveMap.pushGps(ev.fields || {});
+  if (advances && ev.msg_type === "GpsPacket" && liveMap)
+    liveMap.pushGps(ev.fields || {});
 }
 
 // --------------------------------------------------------------- live status pill

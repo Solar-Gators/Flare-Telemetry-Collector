@@ -100,6 +100,31 @@ header select {
 
 main { padding: 12px; }
 
+.primary-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.primary-metrics .card { min-height: 220px; display: flex; flex-direction: column; justify-content: center; }
+.detail-toggle { margin-bottom: 12px; }
+.live-chart { height: 300px; margin-bottom: 12px; }
+.live-chart canvas { width: 100% !important; height: 100% !important; }
+.full-map { height: calc(100vh - 150px); min-height: 420px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.history-chart { height: 430px; margin-bottom: 12px; }
+.history-chart canvas { width: 100% !important; height: 100% !important; }
+.history-summary { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-family: "Courier New", monospace; }
+.history-actions { display: flex; gap: 8px; margin: 12px 0; }
+.history-table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.history-table-wrap table { width: 100%; border-collapse: collapse; font-family: "Courier New", monospace; font-size: 12px; }
+.history-table-wrap th, .history-table-wrap td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+
+@media (max-width: 760px) {
+  .primary-metrics { grid-template-columns: 1fr; }
+  .primary-metrics .card { min-height: 170px; }
+  .full-map { min-height: 320px; height: 65vh; }
+}
+
 /* ---------- history view ---------- */
 .range-controls {
   display: flex; flex-wrap: wrap; align-items: center; gap: 14px;

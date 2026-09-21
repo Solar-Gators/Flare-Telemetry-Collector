@@ -30,9 +30,9 @@ Run (from `collector/`, using the shared root `.venv`):
 
 ## `server/`
 The self-contained telemetry website: ingests uploads, stores them in Postgres,
-serves a live dashboard (Leaflet map + Chart.js) with a session picker and history
-replay, and pushes live updates over a WebSocket. Team-only via a shared password.
-Deploy with Docker Compose (FastAPI + Postgres + Caddy HTTPS). See `server/README.md`.
+serves a live dashboard (Leaflet map + Chart.js), dedicated Live/Map/History pages,
+and pushes live updates over a WebSocket. Team-only via a shared password. Deploy
+with Docker Compose (FastAPI + Postgres + Caddy HTTPS). See `server/README.md`.DATABASE_URL="sqlite:///./data/telemetry.db" \
 
 ## `shared/`
 `can_messages.toml` — a vendored copy of the firmware's canonical CAN + radio
