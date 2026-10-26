@@ -177,6 +177,42 @@ main { padding: 12px; }
   .subsystem-grid > .card { grid-column: 1 / -1 !important; }
 }
 
+/* Keep the live view focused on the three most useful at-a-glance values.
+   The replay view keeps the regular subsystem ordering above. */
+#view-live #cards {
+  max-width: 1280px;
+  margin: 0 auto;
+}
+#view-live #cards > .card:not(.card-speed):not(.card-solar):not(.card-soc) {
+  order: 4;
+}
+#view-live #cards > .card-speed {
+  grid-column: span 4;
+  order: 1;
+  min-height: 154px;
+}
+#view-live #cards > .card-solar {
+  grid-column: span 4;
+  order: 2;
+  min-height: 154px;
+}
+#view-live #cards > .card-soc {
+  grid-column: span 4;
+  order: 3;
+  min-height: 154px;
+}
+#view-live #cards .card-big {
+  font-size: 78px;
+}
+
+@media (max-width: 1200px) and (min-width: 761px) {
+  #view-live #cards > .card-speed,
+  #view-live #cards > .card-solar,
+  #view-live #cards > .card-soc {
+    grid-column: span 2;
+  }
+}
+
 /* ---------- card ---------- */
 .card {
   background: var(--panel); border: 1px solid var(--border);
