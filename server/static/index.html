@@ -20,10 +20,15 @@
   </header>
 
   <main>
-    <!-- LIVE: grouped subsystem cards (like the desktop GUI). The map card's
-         #map div is created inside this grid by cards.js and never re-rendered. -->
+    <!-- LIVE: primary metrics and supporting telemetry are separate sections. -->
     <section id="view-live">
-      <div id="cards" class="subsystem-grid"></div>
+      <div class="live-hero-section">
+        <div id="hero-cards" class="subsystem-grid live-hero-grid"></div>
+      </div>
+      <div class="live-details-section">
+        <h2 class="live-section-title">System Details</h2>
+        <div id="detail-cards" class="subsystem-grid live-details-grid"></div>
+      </div>
     </section>
 
     <!-- HISTORY: pick a session + range; review decimated charts + GPS track. -->

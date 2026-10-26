@@ -177,40 +177,49 @@ main { padding: 12px; }
   .subsystem-grid > .card { grid-column: 1 / -1 !important; }
 }
 
-/* Keep the live view focused on the three most useful at-a-glance values.
-   The replay view keeps the regular subsystem ordering above. */
-#view-live #cards {
+.live-hero-section,
+.live-details-section {
   max-width: 1280px;
   margin: 0 auto;
 }
-#view-live #cards > .card:not(.card-speed):not(.card-solar):not(.card-soc) {
-  order: 4;
+.live-hero-section {
+  padding: 8px 0 16px;
 }
-#view-live #cards > .card-speed {
-  grid-column: span 4;
-  order: 1;
+.live-hero-grid {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.live-hero-grid > .card {
+  grid-column: span 1;
   min-height: 154px;
 }
-#view-live #cards > .card-solar {
-  grid-column: span 4;
-  order: 2;
-  min-height: 154px;
-}
-#view-live #cards > .card-soc {
-  grid-column: span 4;
-  order: 3;
-  min-height: 154px;
-}
-#view-live #cards .card-big {
+.live-hero-grid .card-big {
   font-size: 78px;
 }
+.live-details-section {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.live-section-title {
+  margin: 0 0 10px;
+  color: var(--title);
+  font-size: 12px;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+}
+.live-details-grid {
+  grid-template-columns: repeat(12, 1fr);
+  gap: 10px;
+}
+.live-details-grid .card {
+  padding: 7px 11px 9px;
+}
 
-@media (max-width: 1200px) and (min-width: 761px) {
-  #view-live #cards > .card-speed,
-  #view-live #cards > .card-solar,
-  #view-live #cards > .card-soc {
-    grid-column: span 2;
+@media (max-width: 760px) {
+  .live-hero-grid {
+    grid-template-columns: 1fr;
   }
+  .live-hero-grid > .card { grid-column: 1 / -1; }
 }
 
 /* ---------- card ---------- */

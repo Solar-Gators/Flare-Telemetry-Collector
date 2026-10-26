@@ -90,11 +90,21 @@ function makeMap(containerId, { follow = false } = {}) {
 let liveCards = null;                  // { update(state, nowS, mode) } from cards.js
 let liveMap = null;
 
-function initLiveCards() { liveCards = buildCards($("#cards")); }
+function initLiveCards() {
+  liveCards = [
+    buildCards($("#hero-cards"), { cardIds: ["speed", "solar", "soc"] }),
+    buildCards($("#detail-cards"), {
+      cardIds: ["main_batt", "motor", "mppt1", "mppt3", "mppt2", "map",
+        "contactors", "frames", "radio"],
+    }),
+  ];
+}
 function initLiveMap()   { liveMap = makeMap("map", { follow: true }); }
 
 function refreshLiveCards() {
-  if (liveCards) liveCards.update(latest, Date.now() / 1000, "live");
+  if (liveCards) {
+    for (const cards of liveCards) cards.update(latest, Date.now() / 1000, "live");
+  }
 }
 
 // ------------------------------------------------------------------ live wire
