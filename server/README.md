@@ -23,7 +23,10 @@ collector (laptop)  --HTTPS POST /api/ingest-->  Caddy --> FastAPI --> Postgres
 | `GET /api/history?session=&type=&since=&until=&limit=` | cookie | rows for charts |
 | `GET /api/track?session=` | cookie | GPS points for the map |
 | `WS /ws` | cookie | live event stream |
-| `GET /` | — | dashboard (or login page if not signed in) |
+| `GET /live` | cookie | live telemetry dashboard |
+| `GET /map` | cookie | live position map and track |
+| `GET /history` | cookie | historical charts, replay, and track |
+| `GET /` | — | dashboard default (or login page if not signed in) |
 
 Auth is intentionally simple: one shared **team password** → an HMAC-signed cookie,
 and a separate **ingest token** for the collector. No user database.
@@ -104,6 +107,28 @@ FLARE_INGEST_TOKEN=dev FLARE_VIEW_PASSWORD=dev SECRET_KEY=dev \
 ```
 Then POST a sample batch to `http://127.0.0.1:8000/api/ingest` with
 `Authorization: Bearer dev`, or run the collector's `rest` backend against it.
+
+## Deploy on Vercel
+
+The repository includes a Vercel Python entrypoint (`api/index.py`) and routing
+configuration. Import the repository with its root as the Vercel project root;
+do not set `server/` as the root directory. Vercel installs the dependencies
+from the root `requirements.txt`.
+
+Vercel's filesystem is ephemeral, so configure an external Postgres database:
+
+```env
+DATABASE_URL=postgresql+psycopg://user:password@host/database?sslmode=require
+FLARE_INGEST_TOKEN=<random-token>
+FLARE_VIEW_PASSWORD=<team-password>
+SECRET_KEY=<random-secret>
+```
+
+`DOMAIN`, `POSTGRES_PASSWORD`, and Docker-specific settings are not needed on
+Vercel. The app is reached at the Vercel deployment URL or a custom domain.
+Vercel serverless functions do not provide a persistent WebSocket process, so
+the dashboard's live WebSocket stream is not suitable for Vercel; use the
+Docker/Caddy deployment when live updates are required.
 
 ## Operations
 

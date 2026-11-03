@@ -499,7 +499,7 @@ async def ws(websocket: WebSocket):
 
 # --------------------------------------------------------------------------- pages
 
-#  "/" serves DIFFERENT content for the same URL depending on the session cookie,
+#  Dashboard routes serve DIFFERENT content for the same URL depending on the session cookie,
 #  so it must never be cached. Without this the browser reuses the cached login
 #  page after signing in and the user appears stuck on the login screen until
 #  they force a refresh.
@@ -510,10 +510,17 @@ _NO_STORE = {
 }
 
 
-@app.get("/")
-def index(request: Request):
+def dashboard_page(request: Request):
     page = "index.html" if auth.valid_cookie(request.cookies.get(settings.COOKIE_NAME)) else "login.html"
     return FileResponse(os.path.join(_STATIC, page), headers=_NO_STORE)
+
+
+@app.get("/")
+@app.get("/live")
+@app.get("/map")
+@app.get("/history")
+def index(request: Request):
+    return dashboard_page(request)
 
 
 @app.get("/healthz")

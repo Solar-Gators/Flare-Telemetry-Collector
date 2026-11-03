@@ -16,7 +16,7 @@ const GPS_MIN_SATS = 4;               // trust a fix only with at least this man
 
 // ------------------------------------------------------------------ shared state
 let SCHEMA = { messages: {}, enums: {} };
-let mode = "live";                    // "live" | "history"
+let mode = "live";                    // "live" | "map" | "history"
 let liveSession = null;               // session_uuid backing the live map track
 const latest = {};                    // channel -> {channel, msg_type, ts_utc, fields}
 

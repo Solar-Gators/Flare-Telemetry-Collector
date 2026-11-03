@@ -4,8 +4,7 @@
  * Live stays WS-connected even while the History view is open; the `mode` guard
  * freezes the live map (but never the `latest` map) during history.
  *
- * makeMap() is a small Leaflet factory reused by both the live position map and
- * the History track/replay map.
+ * makeMap() is a small Leaflet factory for the live position map.
  */
 
 // -------------------------------------------------------------------- map factory
@@ -94,12 +93,12 @@ function initLiveCards() {
   liveCards = [
     buildCards($("#hero-cards"), { cardIds: ["speed", "solar", "soc"] }),
     buildCards($("#detail-cards"), {
-      cardIds: ["main_batt", "motor", "mppt1", "mppt3", "mppt2", "map",
+      cardIds: ["main_batt", "motor", "mppt1", "mppt3", "mppt2",
         "contactors", "frames", "radio"],
     }),
   ];
 }
-function initLiveMap()   { liveMap = makeMap("map", { follow: true }); }
+function initLiveMap()   { liveMap = makeMap("map-page-map", { follow: true }); }
 
 function refreshLiveCards() {
   if (liveCards) {
@@ -133,7 +132,7 @@ function applyEvent(ev) {
   // within a batch, and this guard is what the map depends on.
   const advances = !prev || ev.ts_utc >= prev.ts_utc;
   if (advances) latest[ch] = { ...ev, channel: ch };
-  if (mode !== "live") return;                 // map frozen while viewing history
+  if (mode !== "live" && mode !== "map") return; // map frozen while viewing history
   // Cards re-render on a timer (see boot) so staleness is re-evaluated even when
   // a channel simply stops arriving; here we only drive the live map.
   //

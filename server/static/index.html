@@ -14,6 +14,7 @@
     <div class="spacer"></div>
     <nav class="viewnav">
       <button type="button" data-view="live" class="active">Live</button>
+      <button type="button" data-view="map">Map</button>
       <button type="button" data-view="history">History</button>
     </nav>
     <button id="logout" class="ghost" type="button">Sign out</button>
@@ -31,7 +32,12 @@
       </div>
     </section>
 
-    <!-- HISTORY: pick a session + range; review decimated charts + GPS track. -->
+    <!-- MAP: the current position and track only. -->
+    <section id="view-map" hidden>
+      <div id="map-page-map" class="map-page-map"></div>
+    </section>
+
+    <!-- HISTORY: pick a session + range and review decimated trend charts. -->
     <section id="view-history" hidden>
       <div class="range-controls">
         <label class="ctl">Session
@@ -49,17 +55,6 @@
           <button id="export-all" class="ghost" type="button">⬇ CSV — everything</button>
         </div>
       </div>
-      <div id="history-map" class="history-map"></div>
-
-      <!-- Replay: scrub to any instant; the cards below reconstruct the whole
-           dashboard at that moment, the map marker moves, charts show a cursor. -->
-      <div class="replay-bar">
-        <span class="replay-label">Replay</span>
-        <input type="range" id="scrubber" min="0" max="1000" value="1000" step="1" />
-        <span id="replay-time" class="replay-time">—</span>
-      </div>
-      <div id="replay-cards" class="subsystem-grid replay-grid"></div>
-
       <div class="charts" id="history-charts"><div class="section-title">Trends</div></div>
     </section>
   </main>

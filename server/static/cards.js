@@ -393,8 +393,7 @@ function applyAge(valEl, age) {
 // ----------------------------------------------------------------- public API
 // Build selected cards into `container` once; returns { update(state, nowS, mode) }.
 // includeMap:false skips the GPS map card — the History replay panel reuses this
-// model but already has its own map (#history-map), and only one element may
-// own the id "map".
+// model but the dedicated map is shown on the Map view.
 function buildCards(container, { includeMap = true, cardIds = null } = {}) {
   container.innerHTML = "";
   const built = CARDS.filter(

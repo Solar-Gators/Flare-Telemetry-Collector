@@ -89,7 +89,7 @@ header select {
 .live-pill.on   { color: var(--accent-2); }
 .live-pill.stale .dot { background: var(--danger); }
 
-/* view nav (Live | History) */
+/* view nav */
 .viewnav { display: inline-flex; gap: 4px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
 .viewnav button {
   background: transparent; color: var(--muted); border: 0; padding: 6px 16px;
@@ -118,29 +118,7 @@ main { padding: 12px; }
 .export-group { display: inline-flex; gap: 6px; }
 .export-group button { font-size: 12px; padding: 6px 10px; }
 .export-group button[disabled] { opacity: .5; cursor: default; }
-.history-map { height: 360px; width: 100%; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); margin-bottom: 12px; }
-
-/* replay scrubber */
-.replay-bar {
-  display: flex; align-items: center; gap: 14px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 14px; margin-bottom: 12px;
-}
-.replay-label { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--title); font-weight: 700; }
-.replay-time { font-family: "Courier New", monospace; font-size: 13px; color: var(--c-blue); min-width: 190px; text-align: right; }
-#scrubber {
-  flex: 1; appearance: none; height: 5px; border-radius: 999px;
-  background: var(--panel-2); border: 1px solid var(--border); outline: none;
-}
-#scrubber::-webkit-slider-thumb {
-  appearance: none; width: 15px; height: 15px; border-radius: 50%;
-  background: var(--c-blue); border: 2px solid var(--bg); cursor: pointer;
-}
-#scrubber::-moz-range-thumb {
-  width: 15px; height: 15px; border-radius: 50%;
-  background: var(--c-blue); border: 2px solid var(--bg); cursor: pointer;
-}
-.replay-grid { margin-bottom: 12px; }
+.map-page-map { height: calc(100vh - 86px); min-height: 420px; width: 100%; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
 
 /* ---------- subsystem card grid (mirrors gui.py rows) ---------- */
 .subsystem-grid {

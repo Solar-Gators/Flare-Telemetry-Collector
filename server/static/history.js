@@ -1,9 +1,6 @@
 /* history.js — the History view: pick a past session, a time range, and review
- * decimated trend charts + the GPS track. Owns its own Leaflet map and Chart.js
- * instances (separate from the live view) and is lazily initialised the first
- * time the view is shown, so charts/map size correctly (not while hidden).
- *
- * Phase 3 adds a replay scrubber here; Phase 4 adds a data table + CSV export.
+ * decimated trend charts. Owns its Chart.js instances and is lazily initialised
+ * the first time the view is shown, so charts size correctly after being hidden.
  */
 
 // palette (matches the live cards)
@@ -54,7 +51,6 @@ function hexA(hex, a) {
 
 const HIST = {
   inited: false,
-  map: null,
   charts: {},
   runs: [],              // [{id, first_seen, last_seen, sessions:[uuid], gaps:[[a,b]]}]
   run: null,             // selected run (several sessions merged for display)
@@ -63,69 +59,7 @@ const HIST = {
   override: null,        // {since, until} from a drag-zoom, or null
   loading: false,        // guard so programmatic scale changes don't re-trigger zoom
   maxPoints: 1500,
-  // replay
-  trackPoints: [],       // loaded GPS track, used to move the marker while scrubbing
-  replayCards: null,     // second cards.js instance, rendered in "replay" mode
-  replayT: null,         // instant currently being replayed (epoch seconds)
-  replayPending: false,  // a /api/replay request is in flight
-  replayQueued: null,    // newest scrub position to fetch once the current one lands
-  replayTimer: null,     // debounce handle
 };
-
-// Vertical dashed line marking the replayed instant on every chart, with the
-// timestamp in a small chip riding on top of the cursor.
-const timeCursorPlugin = {
-  id: "timeCursor",
-  afterDatasetsDraw(chart) {
-    const t = HIST.replayT;
-    if (t == null) return;
-    const x = chart.scales.x;
-    if (!x || t < x.min || t > x.max) return;
-    const px = x.getPixelForValue(t);
-    const { top, bottom, left, right } = chart.chartArea;
-    const ctx = chart.ctx;
-
-    ctx.save();
-    // the cursor line
-    ctx.beginPath();
-    ctx.strokeStyle = "#e8edf2";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 3]);
-    ctx.moveTo(px, top);
-    ctx.lineTo(px, bottom);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // timestamp chip, clamped to stay inside the plot area
-    const label = new Date(t * 1000).toLocaleTimeString([], { hour12: false });
-    ctx.font = '600 11px "Courier New", monospace';
-    const w = ctx.measureText(label).width + 12;
-    const h = 18;
-    const bx = Math.min(Math.max(px - w / 2, left), right - w);
-    const by = top + 2;
-    ctx.fillStyle = "#0d1117";
-    ctx.strokeStyle = "#4fc3f7";
-    ctx.lineWidth = 1;
-    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(bx, by, w, h, 4); ctx.fill(); ctx.stroke(); }
-    else { ctx.fillRect(bx, by, w, h); ctx.strokeRect(bx, by, w, h); }
-    ctx.fillStyle = "#e8edf2";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(label, bx + w / 2, by + h / 2 + 0.5);
-    ctx.restore();
-  },
-};
-
-// Coalesce cursor redraws to one per animation frame — dragging the scrubber
-// fires input events far faster than 11 canvases can usefully repaint.
-let cursorRaf = null;
-function renderCursors() {
-  if (cursorRaf) return;
-  cursorRaf = requestAnimationFrame(() => {
-    cursorRaf = null;
-    for (const id in HIST.charts) HIST.charts[id].render();
-  });
-}
 
 // ------------------------------------------------------------------- sessions
 async function loadSessions() {
@@ -193,7 +127,6 @@ function initHistoryCharts() {
     const ctx = card.querySelector("canvas").getContext("2d");
     HIST.charts[metric.id] = new Chart(ctx, {
       type: "line",
-      plugins: [timeCursorPlugin],
       data: { datasets: metric.series.map((s) => ({
         label: s.label, data: [],
         borderColor: s.color, backgroundColor: s.fill ? hexA(s.color, 0.14) : s.color,
@@ -388,7 +321,6 @@ async function loadHistoryCharts() {
         : `${maxCount} raw pts/series`;
     }
     updateResetBtn();
-    syncScrubber();      // every path that changes the window re-anchors the scrubber
   } finally {
     // release the zoom guard on the next frame, after Chart.js settles the scales
     setTimeout(() => { HIST.loading = false; }, 0);
@@ -419,107 +351,8 @@ function updateResetBtn() {
   if (btn) btn.hidden = !HIST.override;
 }
 
-async function loadHistoryTrack() {
-  if (!HIST.map) return;
-  const ss = runSessionsParam();
-  const q = ss ? `?sessions=${encodeURIComponent(ss)}` : "";
-  const res = await fetch(`/api/track${q}`);
-  if (!res.ok) return;
-  const points = (await res.json()).points || [];
-  HIST.trackPoints = points;      // kept so scrubbing can move the marker locally
-  HIST.map.setTrack(points, true);
-}
-
-// Move the marker to the fix at-or-before `t` using the already-loaded track —
-// instant, no network round-trip, so the position tracks the drag smoothly.
-// /api/track returns points ordered by ts_utc, so a binary search works.
-function markerAtTime(t) {
-  const pts = HIST.trackPoints;
-  if (!pts || !pts.length || !HIST.map || t == null) return;
-  let lo = 0, hi = pts.length - 1, best = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (pts[mid].ts_utc <= t) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
-  }
-  const p = pts[best >= 0 ? best : 0];
-  HIST.map.setMarker(p.lat, p.lon);
-}
-
 async function loadHistoryView() {
-  await Promise.all([
-    loadHistoryCharts().catch((e) => console.error("hist charts", e)),
-    loadHistoryTrack().catch((e) => console.error("hist track", e)),
-  ]);
-}
-
-// ------------------------------------------------------------------- replay
-// Map the slider's 0..1000 position onto the current window.
-function scrubberToTime(pos) {
-  const { since, until } = currentWindow();
-  if (since == null || until == null) return null;
-  return since + (until - since) * (pos / 1000);
-}
-
-// Re-anchor the scrubber whenever the window changes (session/preset/zoom) and
-// show the state at the end of that window.
-function syncScrubber() {
-  const sc = $("#scrubber");
-  const { since, until } = currentWindow();
-  if (!sc || since == null || until == null) return;
-  sc.value = "1000";
-  requestReplay(until);
-}
-
-// Debounced, single-in-flight: while a request is out, remember only the newest
-// position and fetch it once the current one lands. Keeps dragging smooth.
-function requestReplay(t) {
-  if (t == null) return;
-  HIST.replayT = t;
-  const label = $("#replay-time");
-  if (label) label.textContent = new Date(t * 1000).toLocaleString([], { hour12: false });
-  markerAtTime(t);     // instant: marker + chart cursor follow the drag with no
-  renderCursors();     // network wait; the debounced fetch below refreshes cards
-  clearTimeout(HIST.replayTimer);
-  HIST.replayTimer = setTimeout(() => fireReplay(t), 120);
-}
-
-async function fireReplay(t) {
-  if (!HIST.run) return;
-  if (HIST.replayPending) { HIST.replayQueued = t; return; }
-  HIST.replayPending = true;
-  try {
-    const q = new URLSearchParams({ sessions: runSessionsParam(), t: String(t) });
-    const res = await fetch(`/api/replay?${q}`);
-    if (res.ok) applyReplay(await res.json());
-    // A failed replay must still paint the cards — otherwise they sit in their
-    // freshly-built state and it reads as "the panel is broken" rather than
-    // "this request failed".
-    else { console.error("replay", res.status, await res.text().catch(() => "")); applyReplay({ t, channels: {} }); }
-  } catch (e) {
-    console.error("replay", e);
-    applyReplay({ t, channels: {} });
-  } finally {
-    HIST.replayPending = false;
-    const queued = HIST.replayQueued;
-    HIST.replayQueued = null;
-    if (queued != null && queued !== t) fireReplay(queued);
-  }
-}
-
-function applyReplay(data) {
-  const channels = data.channels || {};
-  HIST.replayT = data.t;
-  // Same renderer as the live dashboard — "replay" mode skips wall-clock
-  // staleness so nothing greys out or reads N/A just for being old.
-  if (HIST.replayCards) HIST.replayCards.update(channels, data.t, "replay");
-  // The marker normally moves instantly from the local track (see markerAtTime);
-  // fall back to the server's fix only when no track is loaded, so the two
-  // sources never fight over the marker. The full trail stays drawn for context.
-  const gps = channels["GpsPacket"];
-  if (gps && gps.fields && HIST.map && !HIST.trackPoints.length) {
-    HIST.map.setMarker(gps.fields.latitude, gps.fields.longitude);
-  }
-  renderCursors();
+  await loadHistoryCharts().catch((e) => console.error("hist charts", e));
 }
 
 // --------------------------------------------------------------------- export
@@ -582,14 +415,8 @@ function fmtBytes(n) {
 
 // ------------------------------------------------------------------- lifecycle
 function initHistory() {
-  HIST.map = makeMap("history-map");
   initHistoryCharts();
   initChartModal();
-  // Second card instance — no map card here, the History view has its own.
-  HIST.replayCards = buildCards($("#replay-cards"), { includeMap: false });
-
-  const sc = $("#scrubber");
-  if (sc) sc.addEventListener("input", () => requestReplay(scrubberToTime(Number(sc.value))));
 
   $("#hist-session").addEventListener("change", (e) => {
     HIST.run = HIST.runs.find((r) => r.id === e.target.value) || null;
@@ -624,6 +451,5 @@ function enterHistory() {
     return;
   }
   // Re-show: Leaflet/Chart.js need a nudge after being hidden.
-  if (HIST.map) HIST.map.map.invalidateSize();
   for (const id in HIST.charts) HIST.charts[id].resize();
 }
