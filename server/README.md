@@ -124,6 +124,10 @@ FLARE_VIEW_PASSWORD=<team-password>
 SECRET_KEY=<random-secret>
 ```
 
+`POSTGRES_URL`, `POSTGRES_URL_NON_POOLING`, and `NEON_DATABASE_URL` are also
+accepted for Neon/Vercel integrations. A plain `postgresql://` or legacy
+`postgres://` value is normalized to the installed Psycopg 3 SQLAlchemy driver.
+
 `DOMAIN`, `POSTGRES_PASSWORD`, and Docker-specific settings are not needed on
 Vercel. The app is reached at the Vercel deployment URL or a custom domain.
 Vercel serverless functions do not provide a persistent WebSocket process, so

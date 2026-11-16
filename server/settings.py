@@ -11,7 +11,33 @@ _REPO_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
 
 # Database. SQLite by default for local dev; Postgres in production, e.g.
 #   postgresql+psycopg://flare:password@db:5432/flare
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./data/telemetry.db")
+#
+# Neon/Vercel integrations have used both DATABASE_URL and POSTGRES_URL. Keep
+# the aliases here so a connected integration cannot silently send production
+# traffic to the ephemeral SQLite fallback.
+_DATABASE_URL = next(
+    (os.environ[name].strip() for name in (
+        "DATABASE_URL", "POSTGRES_URL", "POSTGRES_URL_NON_POOLING",
+        "NEON_DATABASE_URL",
+    ) if os.environ.get(name, "").strip()),
+    "",
+)
+if not _DATABASE_URL:
+    if os.environ.get("VERCEL") == "1":
+        raise RuntimeError(
+            "No Postgres connection URL configured on Vercel. "
+            "Set DATABASE_URL (or POSTGRES_URL) to the Neon connection string."
+        )
+    _DATABASE_URL = "sqlite:///./data/telemetry.db"
+
+# requirements.txt installs Psycopg 3, while Neon commonly provides the
+# driver-neutral postgresql:// form. Pin the SQLAlchemy dialect explicitly.
+if _DATABASE_URL.startswith("postgres://"):
+    _DATABASE_URL = "postgresql://" + _DATABASE_URL[len("postgres://"):]
+if _DATABASE_URL.startswith("postgresql://"):
+    _DATABASE_URL = "postgresql+psycopg://" + _DATABASE_URL[len("postgresql://"):]
+
+DATABASE_URL = _DATABASE_URL
 
 # Bearer token the collector must present on POST /api/ingest.
 INGEST_TOKEN = os.environ.get("FLARE_INGEST_TOKEN", "")
