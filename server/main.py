@@ -151,6 +151,9 @@ app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 def require_view(request: Request):
     if not auth.valid_cookie(request.cookies.get(settings.COOKIE_NAME)):
         raise HTTPException(status_code=401, detail="login required")
+    # Vercel may handle a request without running ASGI lifespan hooks first.
+    # Ensure read endpoints use the same database as ingest in a cold function.
+    db.init_db()
 
 
 def require_ingest(request: Request):
@@ -162,6 +165,8 @@ def require_ingest(request: Request):
 
 @app.post("/api/ingest")
 async def ingest(request: Request, _=Depends(require_ingest)):
+    # Do not rely solely on lifespan: serverless ASGI adapters may skip it.
+    db.init_db()
     body = await request.json()
     records = body.get("records", []) if isinstance(body, dict) else []
     result = await run_in_threadpool(db.store_batch, records)
@@ -525,4 +530,8 @@ def index(request: Request):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    try:
+        return {"ok": True, **db.health()}
+    except Exception:
+        log.exception("database health check failed")
+        raise HTTPException(status_code=503, detail="database unavailable")

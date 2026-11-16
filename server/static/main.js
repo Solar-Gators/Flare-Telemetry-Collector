@@ -34,6 +34,12 @@ async function boot() {
   // Connect live + status FIRST.
   connectWs();
   setInterval(tickLive, 1000);
+  // Vercel serverless deployments cannot provide the long-lived WebSocket
+  // process used by the Docker deployment, so keep the dashboard current via
+  // the same authenticated API backed by the database.
+  setInterval(() => {
+    if (mode !== "history") loadLatest().catch((e) => console.error("latest poll", e));
+  }, 5000);
   setInterval(() => { if (mode === "live") refreshLiveCards(); }, TILE_REFRESH_MS);
 
   document.querySelectorAll(".viewnav button").forEach((button) =>

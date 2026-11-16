@@ -6,6 +6,7 @@
 
 import math
 import os
+import threading
 
 from sqlalchemy import (
     JSON, Column, Float, Index, Integer, MetaData, String, Table,
@@ -22,6 +23,8 @@ _JSON = JSON().with_variant(JSONB, "postgresql")
 
 engine = create_engine(settings.DATABASE_URL, future=True, pool_pre_ping=True)
 metadata = MetaData()
+_init_lock = threading.Lock()
+_initialized = False
 
 sessions = Table(
     "sessions", metadata,
@@ -49,6 +52,18 @@ frames = Table(
 
 def init_db() -> None:
     """Create tables. For SQLite, make sure the parent directory exists."""
+    global _initialized
+    if _initialized:
+        return
+    with _init_lock:
+        if _initialized:
+            return
+        _init_db()
+        _initialized = True
+
+
+def _init_db() -> None:
+    """Create tables once per warm process, including serverless invocations."""
     url = settings.DATABASE_URL
     if url.startswith("sqlite:///") and not url.startswith("sqlite:////"):
         path = url[len("sqlite:///"):]
@@ -64,6 +79,23 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_frames_session_type_ts "
             "ON frames (session_uuid, msg_type, ts_utc)"
         ))
+
+
+def health() -> dict:
+    """Verify connectivity and report the stored row counts."""
+    init_db()
+    with engine.begin() as conn:
+        sessions_count = conn.execute(
+            select(func.count()).select_from(sessions)
+        ).scalar_one()
+        frames_count = conn.execute(
+            select(func.count()).select_from(frames)
+        ).scalar_one()
+    return {
+        "database": engine.dialect.name,
+        "sessions": sessions_count,
+        "frames": frames_count,
+    }
 
 
 def _insert_ignore(rows: list[dict]):
