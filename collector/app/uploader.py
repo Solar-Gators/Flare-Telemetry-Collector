@@ -152,6 +152,10 @@ def make_backend() -> TelemetryBackend | None:
     """
     name = os.environ.get("FLARE_UPLOAD_BACKEND", "").strip().lower()
     if name in ("", "null", "none", "off"):
+        logger.warning(
+            "uploader: no online backend configured; frames will remain local "
+            "with synced=0 (set FLARE_UPLOAD_BACKEND=rest to upload)"
+        )
         return None
     if name == "jsonl":
         path = os.environ.get("FLARE_UPLOAD_JSONL") or os.path.join("data", "uploaded.jsonl")
