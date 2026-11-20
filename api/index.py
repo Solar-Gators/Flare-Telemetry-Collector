@@ -15,8 +15,10 @@ from fastapi import FastAPI, Request as FastAPIRequest, Response
 
 DATA_API_URL = os.environ.get("FLARE_DATA_API_URL", "").rstrip("/")
 
+app = FastAPI(title="Flare Telemetry")
+
 if DATA_API_URL:
-    app = FastAPI(title="Flare Telemetry Proxy")
+    app.title = "Flare Telemetry Proxy"
 
     @app.api_route(
         "/{path:path}",
